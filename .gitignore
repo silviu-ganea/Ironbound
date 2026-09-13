@@ -1,0 +1,50 @@
+# ============================================================
+# Ironbound - Unreal Engine
+# ============================================================
+
+# Unreal generated / rebuildable directories
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+
+# Plugin generated files
+Plugins/**/Binaries/
+Plugins/**/Intermediate/
+
+# Visual Studio / Rider / IDE files
+.vs/
+.idea/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.user
+*.userosscache
+*.sln.docstates
+
+# C/C++ generated build files
+*.obj
+*.pch
+*.pdb
+*.ipch
+*.iobj
+*.ipdb
+*.ilk
+
+# OS junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Unreal crash/log/temp files
+*.log
+*.tmp
+
+# Local tooling
+.codex/
+
+# MCP/local machine configuration
+.mcp.json
