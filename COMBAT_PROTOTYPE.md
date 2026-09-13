@@ -500,6 +500,16 @@ Main character Blueprint:
 
 
 
+\## Combat stance — tested / completed (2026-09-14)
+
+- [x] Validated in Play: stationary guard, normal keyboard/GASP movement, automatic return to guard, and the existing attack montage.
+- `SandboxCharacter_Mover_ABP` caches the post-procedural GASP locomotion pose (`Procedural_FullBody`) as `BaseLocomotionPose`.
+- Copy `CombatStance` from `SandboxCharacter_Mover` into the AnimBP; calculate `IsCombatStationary` from `Speed2D < 5` using GASP's existing speed value.
+- `Sword_ForwardHigh` + stationary selects the full-body `A_Sword_Guard_ForwardHigh` pose. Moving selects `BaseLocomotionPose` with **NO upper-body guard overlay**; stopping while the stance remains active automatically restores the full-body guard. `None` uses normal GASP locomotion.
+- Keep `SwordAttackSlot` after stance selection. The existing attack montage still works and its physical execution looks cleaner / less tangled.
+- Deliberately abandoned upper-body-only moving guard for now: normal W movement runs/jogs and looks unnatural with the sword held in guard. Revisit only for dedicated combat footwork or AI shifting.
+- Retain this session's `BP_FIghterAIController` and reusable character `Attack` event as the AI intent foundation; further AI behavior is deferred until physical strikes are reliable.
+
 \# CURRENT ATTACK TEST
 
 
@@ -1226,7 +1236,7 @@ is valuable project knowledge.
 
 
 
-Phase 2 — Test Max Torque independently from Angular Strength.
+Build and test the first stance-based attack from Sword_ForwardHigh, preserving the validated guard / locomotion / montage flow. Next, separate valid strike windows from incidental physical contact and check recovery / self-snags before expanding AI. Phase 2 torque-vs-tracking experiments remain pending.
 
 
 
