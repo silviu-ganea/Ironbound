@@ -962,21 +962,23 @@ Current hit/ragdoll logic is \*\*not final combat/damage architecture\*\*.
 
 
 
-Current priority:
+Completed:
 
 
 
-\- \[ ] Duplicate the current known-working GASP level.
+\- \[x] Duplicate the current known-working GASP level.
 
-\- \[ ] Create a dedicated combat-development level, e.g. `L\_CombatPrototype`.
+\- \[x] Create a dedicated combat-development level: `L\_CombatPrototype`.
 
-\- \[ ] Remove demo clutter gradually.
+\- \[x] Remove demo clutter gradually.
 
-\- \[ ] Preserve hidden GASP dependencies.
+\- \[x] Preserve hidden GASP dependencies.
 
-\- \[ ] Test after every cleanup batch.
+\- \[x] Test after every cleanup batch.
 
 
+
+Cleanup completed and Play-tested successfully. Removed Traversal Gym, teleporters, TargetDummy, floor buttons, demo widgets, arrows/signage and related clutter. Intentionally kept the Landscape/hill for future slope, balance and footing tests. The level retains the working combat setup and core environment actors.
 
 Always verify:
 
@@ -1224,15 +1226,7 @@ is valuable project knowledge.
 
 
 
-Create a clean dedicated combat prototype level while preserving the working GASP-based systems.
-
-
-
-After that:
-
-
-
-Test Max Torque independently from Angular Strength.
+Phase 2 — Test Max Torque independently from Angular Strength.
 
 
 
