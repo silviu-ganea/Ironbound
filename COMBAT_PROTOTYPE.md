@@ -510,6 +510,16 @@ Main character Blueprint:
 - Deliberately abandoned upper-body-only moving guard for now: normal W movement runs/jogs and looks unnatural with the sword held in guard. Revisit only for dedicated combat footwork or AI shifting.
 - Retain this session's `BP_FIghterAIController` and reusable character `Attack` event as the AI intent foundation. AI behavior was deferred while cleaner strikes were explored; following the completed mocap animation milestone below, the next active goal is the limited two-fighter AI duel.
 
+## Health, teams, overhead health bar, and death — tested / completed (2026-09-15)
+
+- [x] Added `MaxHealth` (default 100), `CurrentHealth`, `IsDead`, `DamagePerHit` (default 25), and instance-editable `FighterTeam` to `SandboxCharacter_Mover`.
+- [x] Added `ReceiveCombatHit(DamageAmount, AttackerTeam)`. Dead fighters and fighters on the attacker's team reject damage; health is clamped to zero.
+- [x] Added `WBP_FighterHealthBar` and a screen-space `HealthBar` widget component above every fighter. Runtime damage updates the progress bar and death hides it.
+- [x] Added `Die`: mark dead, hide the health bar, unpossess the controller, disable the Mover component tick, disable capsule collision, switch the skeletal mesh to the `Ragdoll` collision profile, simulate all bodies, and wake the ragdoll.
+- [x] Gated sword damage to an active attack montage and one successful damage event per attack. Incidental/resting sword contacts no longer drain health repeatedly.
+- [x] Replaced the legacy placed combat-opponent instance so it inherits the new widget-component defaults correctly. `Combat_Test_Opponent` is Team 2; the default/spawned fighter is Team 1.
+- Runtime validation: friendly damage left health unchanged; enemy damage changed 100 → 75 and the visible bar to 75%; lethal damage produced health 0, hid the bar, removed the controller, disabled Mover/capsule, and produced a simulated pelvis ragdoll.
+
 ## Cleaner sword animation — completed (2026-09-15)
 
 - [x] Produce a cleaner sword attack animation; the successful final approach was **Unreal MetaHuman mocap**, with a result confirmed successful by the project owner.
@@ -992,17 +1002,17 @@ Current hit/ragdoll logic is \*\*not final combat/damage architecture\*\*.
 
 \# CURRENT ROADMAP
 
-## Next active goal — two AI fighters, one overhead-swing skill
+## Two AI fighters, one overhead-swing skill — tested / completed (2026-09-15)
 
-- [ ] Create two AI-controlled fighter pawns.
-- [ ] Give both fighters only the overhead-swing skill using `/Game/TestSwordAnimations/MocapAnimations/AS_Mocap_SwordSwing_01_RH_UEFN1`.
-- [ ] Build on the existing `BP_FIghterAIController` and reusable character `Attack` event, verifying the mocap sequence's integration into the attack flow.
-- [ ] Make the fighters autonomously engage and repeat this attack without player attack input.
-- [ ] Add the minimal hit/damage, health and death handling needed for the duel; stop the fight when one fighter dies.
-- [ ] Test that both fighters use only this skill and fight autonomously until one dies.
+- [x] `L_CombatPrototype` contains two AI-controlled `SandboxCharacter_Mover` duelists using `BP_FIghterAIController`.
+- [x] `Pawn0 - Team Red` is Team 1 and `Pawn1 - Team Blue` is Team 2. They begin face-to-face at the proven 150 cm strike-test spacing.
+- [x] Both autonomously repeat the existing reusable `Attack` event. A randomized first-attack offset prevents deterministic simultaneous lethal trades.
+- [x] Death immediately clears attack authority before ragdoll, preventing a dead fighter's sword from applying a post-mortem hit.
+- [x] The locally controlled player pawn is Team 0: it is an observer, hides its fighter health widget, rejects combat damage, and is never used by the duel controller.
+- [x] The overhead widget now shows a compact name/team line above the health bar at approximately one head-height above the fighter.
+- Runtime validation: both custom AI controllers attacked and exchanged damage; one fighter died and ragdolled while the other survived (tested with both Red and Blue winning on separate runs); the player observer remained at 100 health.
 
-Status: planned, not implemented by this documentation update. This is the immediate priority; the broader phases below remain the longer-term roadmap. Reliable strike windows and recovery/self-snag checks remain relevant validation work for this duel.
-
+Reliable notify-driven strike windows, navigation/engagement movement, and recovery/self-snag checks remain future combat work.
 ---
 
 ## Completed immediate goal — cleaner sword animation
@@ -1282,9 +1292,9 @@ is valuable project knowledge.
 
 Create two AI-controlled fighter pawns that use only the overhead-swing skill from `/Game/TestSwordAnimations/MocapAnimations/AS_Mocap_SwordSwing_01_RH_UEFN1` and autonomously fight each other until one dies. Preserve the validated guard / locomotion / montage flow and reuse the existing AI controller / Attack event foundation where applicable.
 
-The previous immediate goal was to build and test the first stance-based attack from Sword_ForwardHigh, then validate strike windows and recovery / self-snags before expanding AI. Cleaner-animation exploration is now complete through Unreal MetaHuman mocap; strike-window and recovery checks remain relevant to the upcoming duel. Phase 2 torque-vs-tracking experiments remain pending.
+The health/death/team foundation and a basic montage-active, one-hit-per-attack damage gate are now complete. Precise notify-driven strike windows and recovery / self-snag checks remain relevant to the upcoming duel. Phase 2 torque-vs-tracking experiments remain pending.
 
-This update records the roadmap and technical memory only. AI duel implementation is the next work item and has not been performed here.
+The autonomous two-fighter duel is implemented and runtime-tested. The next combat work should focus on notify-driven strike windows, engagement movement, and recovery/self-snag checks.
 
 
 
@@ -1323,4 +1333,5 @@ Animation describes intended motion.
 Stats determine physical capability.  
 
 Physics determines what actually happens.
+
 
