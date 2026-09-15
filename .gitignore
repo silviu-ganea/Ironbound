@@ -12,6 +12,15 @@ Saved/
 Plugins/**/Binaries/
 Plugins/**/Intermediate/
 
+# Marketplace-installed plugins are machine-local dependencies. Install them
+# separately and keep their source, models, weights, and third-party licenses
+# out of the game repository.
+Plugins/Marketplace/
+
+# Raw MetaHuman Capture Manager ingest data (source video and ingest artifacts)
+# is local working material; commit processed animation assets instead.
+Content/CaptureManager/Imports/Mono_Video_Ingest/
+
 # Visual Studio / Rider / IDE files
 .vs/
 .idea/

@@ -510,7 +510,18 @@ Main character Blueprint:
 - Deliberately abandoned upper-body-only moving guard for now: normal W movement runs/jogs and looks unnatural with the sword held in guard. Revisit only for dedicated combat footwork or AI shifting.
 - Retain this session's `BP_FIghterAIController` and reusable character `Attack` event as the AI intent foundation; further AI behavior is deferred until physical strikes are reliable.
 
-\# CURRENT ATTACK TEST
+## Sword mocap pipeline — proven session workflow (2026-09-15)
+
+See the dedicated [UE 5.8 sword mocap-to-gameplay guide](SWORD_MOCAP_TO_GAMEPLAY.md) for exact ingest, processing-range, solve/export, automatic retargeting, and mirroring settings, asset references, an end-to-end checklist, and troubleshooting.
+
+- Proven result: solve/export/retarget camera footage as captured, then apply `MirrorModifier` with `MDT_UEFN_Mannequin` to a duplicate of the clean UEFN retarget. Preserve an unmodified master. Clean retarget + mirroring produced the correct frontal swing; `ReOrientRootBoneModifier` and manual pelvis rotation were wrong/unnecessary for the perceived stance yaw.
+- Current mocap integration uses the existing `AM_Mocap_SwordSwing_01` Montage and `DefaultGroup.SwordAttackSlot`. Replace only its old animation segment with the final mirrored retargeted sequence, preserving the Montage asset, slot, sections, and notifies. Review timing and validate in Play after any swap.
+- Local binary references confirm the pawn references this Montage, and the Montage references `AS_Mocap_SwordBatch02_Attack01_UEFN`. The sequence contains mirror-modifier/table references, but a separately named mirrored copy and preserved clean master were not verified. See the guide's naming and wiring caveats; exact Blueprint connections and runtime behavior were not inspected in this documentation update.
+- Actor/capsule forward is AI/gameplay forward. A diagonal sword guard does not redefine it; the attack arc should cover actor-forward target space. Future target-facing/Motion Warping can provide small alignment corrections.
+
+The attack entry below records the earlier test setup and remains as history; consult the mocap guide for the newer workflow.
+
+\# EARLIER ATTACK TEST (historical baseline)
 
 
 
