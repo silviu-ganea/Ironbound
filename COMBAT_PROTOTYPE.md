@@ -508,9 +508,29 @@ Main character Blueprint:
 - `Sword_ForwardHigh` + stationary selects the full-body `A_Sword_Guard_ForwardHigh` pose. Moving selects `BaseLocomotionPose` with **NO upper-body guard overlay**; stopping while the stance remains active automatically restores the full-body guard. `None` uses normal GASP locomotion.
 - Keep `SwordAttackSlot` after stance selection. The existing attack montage still works and its physical execution looks cleaner / less tangled.
 - Deliberately abandoned upper-body-only moving guard for now: normal W movement runs/jogs and looks unnatural with the sword held in guard. Revisit only for dedicated combat footwork or AI shifting.
-- Retain this session's `BP_FIghterAIController` and reusable character `Attack` event as the AI intent foundation; further AI behavior is deferred until physical strikes are reliable.
+- Retain this session's `BP_FIghterAIController` and reusable character `Attack` event as the AI intent foundation. AI behavior was deferred while cleaner strikes were explored; following the completed mocap animation milestone below, the next active goal is the limited two-fighter AI duel.
+
+## Cleaner sword animation — completed (2026-09-15)
+
+- [x] Produce a cleaner sword attack animation; the successful final approach was **Unreal MetaHuman mocap**, with a result confirmed successful by the project owner.
+- Exploration included animation/rig solutions and **Cascadeur**. Cascadeur was tried but was not the final approach; preserve this exploration as history.
+- Successful overhead-swing animation sequence: `/Game/TestSwordAnimations/MocapAnimations/AS_Mocap_SwordSwing_01_RH_UEFN1`.
+- This completes the cleaner-animation milestone. The next active goal is two AI-controlled fighter pawns using only this overhead-swing skill and fighting autonomously until one dies.
+- Animation creation is confirmed complete; integration into the AI attack flow and validation of the autonomous duel remain pending.
+
+---
 
 \# CURRENT ATTACK TEST
+
+Current successful overhead-swing animation sequence:
+
+`/Game/TestSwordAnimations/MocapAnimations/AS_Mocap_SwordSwing_01_RH_UEFN1`
+
+Created successfully using Unreal MetaHuman mocap. Use this sequence for the next single-skill AI duel goal.
+
+## Previous attack test setup — retained technical history
+
+The following animation, montage, slot and input describe the previously documented test setup. Replacement of the montage's animation with the new mocap sequence has not been confirmed in this documentation update.
 
 
 
@@ -928,6 +948,12 @@ Do not restart the old retargeting investigation unless new evidence requires it
 
 
 
+## Cleaner animation / rig exploration — historical outcome (2026-09-15)
+
+Animation/rig solutions, including Cascadeur, were explored in pursuit of a cleaner sword swing. Cascadeur was tried but ultimately not used for the successful result. Unreal MetaHuman mocap was the successful final approach, producing `/Game/TestSwordAnimations/MocapAnimations/AS_Mocap_SwordSwing_01_RH_UEFN1`. No specific Cascadeur failure cause was recorded; do not infer that the tool is unusable.
+
+---
+
 \# HIT REACTION STATUS
 
 
@@ -965,6 +991,24 @@ Current hit/ragdoll logic is \*\*not final combat/damage architecture\*\*.
 
 
 \# CURRENT ROADMAP
+
+## Next active goal — two AI fighters, one overhead-swing skill
+
+- [ ] Create two AI-controlled fighter pawns.
+- [ ] Give both fighters only the overhead-swing skill using `/Game/TestSwordAnimations/MocapAnimations/AS_Mocap_SwordSwing_01_RH_UEFN1`.
+- [ ] Build on the existing `BP_FIghterAIController` and reusable character `Attack` event, verifying the mocap sequence's integration into the attack flow.
+- [ ] Make the fighters autonomously engage and repeat this attack without player attack input.
+- [ ] Add the minimal hit/damage, health and death handling needed for the duel; stop the fight when one fighter dies.
+- [ ] Test that both fighters use only this skill and fight autonomously until one dies.
+
+Status: planned, not implemented by this documentation update. This is the immediate priority; the broader phases below remain the longer-term roadmap. Reliable strike windows and recovery/self-snag checks remain relevant validation work for this duel.
+
+---
+
+## Completed immediate goal — cleaner sword animation
+
+- [x] Complete cleaner-animation exploration and obtain the successful Unreal MetaHuman mocap overhead swing (see completed milestone and exploration history above).
+
 
 
 
@@ -1024,7 +1068,7 @@ Do not mass-delete GASP Content assets yet.
 
 
 
-Next major experiment:
+Pending experiment after the active single-skill AI duel goal:
 
 
 
@@ -1236,7 +1280,11 @@ is valuable project knowledge.
 
 
 
-Build and test the first stance-based attack from Sword_ForwardHigh, preserving the validated guard / locomotion / montage flow. Next, separate valid strike windows from incidental physical contact and check recovery / self-snags before expanding AI. Phase 2 torque-vs-tracking experiments remain pending.
+Create two AI-controlled fighter pawns that use only the overhead-swing skill from `/Game/TestSwordAnimations/MocapAnimations/AS_Mocap_SwordSwing_01_RH_UEFN1` and autonomously fight each other until one dies. Preserve the validated guard / locomotion / montage flow and reuse the existing AI controller / Attack event foundation where applicable.
+
+The previous immediate goal was to build and test the first stance-based attack from Sword_ForwardHigh, then validate strike windows and recovery / self-snags before expanding AI. Cleaner-animation exploration is now complete through Unreal MetaHuman mocap; strike-window and recovery checks remain relevant to the upcoming duel. Phase 2 torque-vs-tracking experiments remain pending.
+
+This update records the roadmap and technical memory only. AI duel implementation is the next work item and has not been performed here.
 
 
 
