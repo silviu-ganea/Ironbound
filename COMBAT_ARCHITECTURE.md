@@ -8,7 +8,8 @@ The immediate test remains **Pawn0 attacking passive Pawn1**, with opposing team
 
 | Responsibility | Owner | Contract |
 | --- | --- | --- |
-| Select an enemy and a move | `BP_FIghterAIController` | Submit intent; exclude self, dead fighters, same team, and Team 0. Do not rotate the pawn or manipulate equipment. |
+| Select and retain an enemy | `UIronboundCombatFocusComponent` | Every fighter, including an unpossessed defender, owns its target. Keep a valid choice until a planner changes it or it becomes invalid; being hit does not change selection. Exclude self, dead fighters, same team, and Team 0. |
+| Select a move | `BP_FIghterAIController` | Read the fighter's focus and submit intent. Do not rotate the pawn or manipulate equipment. |
 | Approach, align, commit, recover, cancel | `UIronboundCombatExecutionComponent` | Own action state and combat facing. Commit only after arrival, low measured movement speed, facing tolerance, and contact validation at the actual actor transform. |
 | Apply movement and rotation | Existing Mover input pipeline | `ProduceInput` passes locomotion orientation through `ResolveOrientationIntent`. Mover remains the writer of actor orientation. |
 | Equip/unequip and intended trajectory cache | `UIronboundEquipmentComponent` | Break the constraint before changing simulation; place from authored grip, establish joint frames, then invalidate cached trajectories. Reject equipment changes while committed or recovering. |
@@ -17,6 +18,8 @@ The immediate test remains **Pawn0 attacking passive Pawn1**, with opposing team
 | Intended blade sampling and contact solve | `UIronboundTrajectoryLibrary` | Produce actor-local geometry from animation and authored equipment. Planning and actual-pose validation use the same contact metric. Prediction does not apply damage. |
 | Strike interval | `UIronboundAttackWindow` via existing notify Blueprint | Notify opens/closes state on the fighter's execution component, never on the shared notify object. Completion, interruption, cancellation and death close the window. |
 | Actual contact and health | Existing pawn collision/health Blueprint | Physical sword contact during the strike window drives damage. Health/team/death rules remain here for now. |
+| Living physical control and hit response | `UIronboundCombatBodyComponent` | Animation drives the upper body through Physics Control. Pelvis and legs stay animated. The victim owns bounded hit impulses, compliance and recovery; death releases drives and restores ragdoll joint limits. |
+| Visual gaze | `UIronboundCombatAnimInstance` and the head Look At node | Snapshot the selected target on the game thread. Blend head-only gaze into guard; yield to authored attack animation during commitment. |
 
 ### Equipment and coordinate spaces
 
@@ -71,8 +74,8 @@ The controller's current 0.1-second timer is a small intent source. Circling, do
 
 - Contact prediction currently uses bone positions shifted toward the attacker by capsule radius. This is a **coarse surface proxy**, not per-bone PhysicsAsset geometry. Replace with body-shape distance/sweep queries when adding anatomical targeting, moving-target prediction or obstacles. Navigation is checked separately from the geometric solve.
 - Sampling evaluates an isolated sequence. It does not predict montage blending, root-motion displacement, procedural pose changes, future target motion, or physical tracking error. The current verified montage is a single segment at rate 1; arbitrary montage segments/rates and root-motion attacks need explicit mappings and validation.
-- Weapon hit handling still includes prototype one-hit-per-attack and attacker-owned victim reaction logic. Move reaction policy into a victim health/injury component before expanding damage types, armor or persistent injuries. A failed physical strike must remain possible despite a feasible plan.
-- AI still scans actors and uses a simple timer. Use a fighter registry/perception and a behavior planner as encounter size and tactics grow. A behavior tree/StateTree/utility policy should call the execution interface rather than duplicate it.
+- Weapon hit handling still includes prototype one-hit-per-attack health logic. Reactions now belong to the victim's body component. Introduce a health/injury model before expanding damage types, armor or persistent injuries. A failed physical strike must remain possible despite a feasible plan.
+- Focus currently scans pawns only when it has no valid target; the controller uses a simple timer. Use a fighter registry/perception and a behavior planner as encounter size and tactics grow. A behavior tree/StateTree/utility policy should call the execution interface rather than duplicate it.
 - Stamina, injuries, balance and physical effort limits are future capability/state systems. Do not implement them as exceptions inside trajectory geometry. Feed them into action eligibility/cost and Physics Control capability separately.
 - Save persistent loadout identifiers in fighter/menu data; runtime components own spawned equipment and physics only. Networking, arbitrary character scale/rig combinations, packaged builds and simultaneous active duelists have not been validated here.
 - Verification used the running editor's Live Coding build. A normal Editor/packaged build should be part of the next clean-build check before distributing the project.

@@ -1,0 +1,175 @@
+#include "Combat/IronboundCombatBodyComponent.h"
+#include "Combat/IronboundEquipmentComponent.h"
+#include "Combat/IronboundCombatFocusComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
+#include "PhysicsControlComponent.h"
+#include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/SkeletalBodySetup.h"
+#include "PhysicsEngine/BodyInstance.h"
+#include "PhysicsEngine/PhysicsConstraintTemplate.h"
+
+namespace
+{
+	FPhysicsControlData TrackingData(float Linear, float Angular)
+	{
+		FPhysicsControlData Data;
+		Data.LinearStrength = Linear;
+		Data.AngularStrength = Angular;
+		Data.LinearDampingRatio = Data.AngularDampingRatio = 1.f;
+		Data.bUseSkeletalAnimation = true;
+		Data.bUseAccelerationDriveMode = true;
+		Data.bOnlyControlChildObject = true;
+		return Data;
+	}
+}
+UIronboundCombatBodyComponent::UIronboundCombatBodyComponent()
+{
+	PrimaryComponentTick.bCanEverTick = true;
+	PrimaryComponentTick.TickGroup = TG_PrePhysics;
+	PostPhysicsTick.bCanEverTick = true;
+	PostPhysicsTick.TickGroup = TG_PostPhysics;
+}
+void FIronboundBodyPostPhysicsTick::ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread, const FGraphEventRef& CompletionEvent)
+{
+	if (Target && TickType == LEVELTICK_All) Target->MeasureTracking();
+}
+void UIronboundCombatBodyComponent::RegisterComponentTickFunctions(bool bRegister)
+{
+	Super::RegisterComponentTickFunctions(bRegister);
+	if (bRegister && GetOwner())
+	{
+		PostPhysicsTick.Target = this;
+		PostPhysicsTick.RegisterTickFunction(GetOwner()->GetLevel());
+	}
+	else PostPhysicsTick.UnRegisterTickFunction();
+}
+bool UIronboundCombatBodyComponent::InitializeBody(USkeletalMeshComponent* Mesh, UPhysicsControlComponent* Controls)
+{
+	if (!Mesh || !Controls || !Mesh->GetPhysicsAsset()) return false;
+	FighterMesh = Mesh;
+	PhysicsControls = Controls;
+	AddTickPrerequisiteComponent(Controls); // Current animation cache and controls, then living limits, then physics.
+	bReleased = false;
+	Controls->DestroyAllControlsAndBodyModifiers();
+	UpperBodyBones.Reset();
+	WeaponArmBones.Reset();
+	// The pelvis and legs retain animation/locomotion authority throughout every living reaction.
+	for (const USkeletalBodySetup* Setup : Mesh->GetPhysicsAsset()->SkeletalBodySetups)
+	{
+		if (!Setup) continue;
+		const FName Bone = Setup->BoneName;
+		if (Bone != "spine_01" && !Mesh->BoneIsChildOf(Bone, "spine_01")) continue;
+		const bool bWeaponArm = Bone == "clavicle_r" || Mesh->BoneIsChildOf(Bone, "clavicle_r");
+		(bWeaponArm ? WeaponArmBones : UpperBodyBones).Add(Bone);
+		FPhysicsControlModifierData Modifier;
+		Modifier.MovementType = EPhysicsMovementType::Simulated;
+		Modifier.CollisionType = bWeaponArm ? ECollisionEnabled::NoCollision : ECollisionEnabled::QueryAndPhysics;
+		Modifier.PhysicsBlendWeight = 1.f;
+		Controls->CreateBodyModifier(Mesh, Bone, bWeaponArm ? "WeaponArm" : "ReactionBody", Modifier);
+	}
+	Controls->CreateControlsFromSkeletalMesh(Mesh, WeaponArmBones, EPhysicsControlType::WorldSpace,
+		TrackingData(WeaponTrackingStrength, WeaponTrackingStrength), "WeaponWorld");
+	Controls->CreateControlsFromSkeletalMesh(Mesh, WeaponArmBones, EPhysicsControlType::ParentSpace,
+		TrackingData(0.f, WeaponTrackingStrength), "WeaponParent");
+	Controls->CreateControlsFromSkeletalMesh(Mesh, UpperBodyBones, EPhysicsControlType::WorldSpace,
+		TrackingData(60.f, 60.f), "ReactionWorld");
+	Controls->CreateControlsFromSkeletalMesh(Mesh, UpperBodyBones, EPhysicsControlType::ParentSpace,
+		TrackingData(0.f, 40.f), "ReactionParent");
+	return !WeaponArmBones.IsEmpty() && !UpperBodyBones.IsEmpty();
+}
+void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
+{
+	if (!FighterMesh || !PhysicsControls || !FighterMesh->GetPhysicsAsset()) return;
+	const UPhysicsAsset* Asset = FighterMesh->GetPhysicsAsset();
+	for (int32 Index = 0; Index < Asset->ConstraintSetup.Num(); ++Index)
+	{
+		const UPhysicsConstraintTemplate* Template = Asset->ConstraintSetup[Index];
+		FConstraintInstance* Joint = FighterMesh->GetConstraintInstanceByIndex(Index);
+		if (!Template || !Joint) continue;
+		const auto& Default = Template->DefaultInstance;
+		if (!WeaponArmBones.Contains(Default.ConstraintBone1) && !UpperBodyBones.Contains(Default.ConstraintBone1)) continue;
+		if (bRestore || !bFitJointLimitsToAnimation) Joint->RestoreAngularLimitsToDefault(Default);
+		else
+		{
+			const FTransform Child = PhysicsControls->GetCachedBoneTransform(FighterMesh, Default.ConstraintBone1);
+			const FTransform Parent = PhysicsControls->GetCachedBoneTransform(FighterMesh, Default.ConstraintBone2);
+			// The helper requires CHILD RELATIVE TO PARENT, never a world-space drive target.
+			Joint->WidenLimitsForDriveTarget(Child.GetRelativeTransform(Parent).GetRotation(), Default);
+		}
+	}
+}
+void UIronboundCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
+{
+	// This is servo tuning, not a fighter skill statistic or a percentage of muscular strength.
+	WeaponTrackingStrength = FMath::Clamp(Strength, 5.f, 80.f);
+	if (!PhysicsControls || bReleased) return;
+	PhysicsControls->SetControlDatasInSet("WeaponWorld", TrackingData(WeaponTrackingStrength, WeaponTrackingStrength));
+	PhysicsControls->SetControlDatasInSet("WeaponParent", TrackingData(0.f, WeaponTrackingStrength));
+}
+void UIronboundCombatBodyComponent::UpdateDrives()
+{
+	if (!PhysicsControls || bReleased) return;
+	const float Recovery = 1.f - ReactionWeight;
+	PhysicsControls->SetControlDatasInSet("ReactionWorld", TrackingData(FMath::Lerp(2.f,60.f,Recovery), FMath::Lerp(3.f,60.f,Recovery)));
+	PhysicsControls->SetControlDatasInSet("ReactionParent", TrackingData(0.f, FMath::Lerp(2.f,40.f,Recovery)));
+}
+void UIronboundCombatBodyComponent::ApplyHitReaction(UPrimitiveComponent* Weapon, const FHitResult& Hit)
+{
+	if (!FighterMesh || !Weapon) return;
+	const auto* Focus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+	const auto* Attacker = Weapon->GetOwner() ? Weapon->GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>() : nullptr;
+	if (!Focus || !Attacker || Focus->Team <= 0 || Attacker->Team <= 0 || Focus->Team == Attacker->Team) return;
+	FName Bone = Hit.BoneName;
+	if (!bReleased && !UpperBodyBones.Contains(Bone) && !WeaponArmBones.Contains(Bone)) Bone = "spine_03";
+	FBodyInstance* Body = FighterMesh->GetBodyInstance(Bone);
+	if (!Body) return;
+	FVector Direction = Weapon->GetPhysicsLinearVelocityAtPoint(Hit.ImpactPoint);
+	const float Speed = Direction.Size();
+	if (!Direction.Normalize()) Direction = (GetOwner()->GetActorLocation() - Weapon->GetComponentLocation()).GetSafeNormal();
+	if (!bReleased)
+	{
+		ReactionTimeRemaining = FMath::Max(RecoveryDuration, 0.01f);
+		ReactionWeight = 1.f;
+		++ReactionCount;
+		UpdateDrives();
+	}
+	// Bounded impulse at the contacted body; never launch the entire pelvis/leg chain on a normal hit.
+	const FVector Impulse = Direction * FMath::Clamp(Speed * 0.2f, 60.f, MaxReactionSpeed) * Body->GetBodyMass();
+	FighterMesh->AddImpulseAtLocation(Impulse, Hit.ImpactPoint, Bone);
+}
+void UIronboundCombatBodyComponent::ReleaseForDeath()
+{
+	bReleased = true;
+	ReactionWeight = ReactionTimeRemaining = 0.f;
+	UpdateJointLimits(true);
+	if (PhysicsControls) PhysicsControls->DestroyAllControlsAndBodyModifiers();
+}
+void UIronboundCombatBodyComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* TickFunction)
+{
+	Super::TickComponent(DeltaTime, TickType, TickFunction);
+	if (!PhysicsControls || !FighterMesh || bReleased) return;
+	UpdateJointLimits(false);
+	if (ReactionTimeRemaining > 0.f)
+	{
+		ReactionTimeRemaining = FMath::Max(0.f, ReactionTimeRemaining - DeltaTime);
+		// Hold compliance for the initial impact, then smoothly recover drive authority.
+		const float T = FMath::Clamp(ReactionTimeRemaining / FMath::Max(RecoveryDuration, 0.01f), 0.f, 1.f);
+		ReactionWeight = FMath::SmoothStep(0.f, 0.8f, T);
+		UpdateDrives();
+	}
+}
+void UIronboundCombatBodyComponent::MeasureTracking()
+{
+	if (!PhysicsControls || !FighterMesh || bReleased) return;
+	const auto* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+	if (!Equipment || !Equipment->bReady || !Equipment->Definition || !Equipment->GetWeapon()) return;
+	const FTransform AnimatedHand = PhysicsControls->GetCachedBoneTransform(FighterMesh, Equipment->Definition->HandBone);
+	const FTransform ActualHand = FighterMesh->GetSocketTransform(Equipment->Definition->HandBone);
+	HandTrackingError = FVector::Distance(AnimatedHand.GetLocation(), ActualHand.GetLocation());
+	HandAngularTrackingError = FMath::RadiansToDegrees(AnimatedHand.GetRotation().AngularDistance(ActualHand.GetRotation()));
+	const FVector IntendedTip = (Equipment->Definition->WeaponToHand * AnimatedHand).TransformPosition(Equipment->Definition->BladeTip);
+	const FVector ActualTip = Equipment->GetWeapon()->GetComponentTransform().TransformPosition(Equipment->Definition->BladeTip);
+	WeaponTipTrackingError = FVector::Distance(IntendedTip, ActualTip);
+	GripTipError = FVector::Distance((Equipment->Definition->WeaponToHand * ActualHand).TransformPosition(Equipment->Definition->BladeTip), ActualTip);
+}

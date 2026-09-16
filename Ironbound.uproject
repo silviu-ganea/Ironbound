@@ -12,6 +12,10 @@
 	"Description": "",
 	"Plugins": [
 		{
+			"Name": "PhysicsControl",
+			"Enabled": true
+		},
+		{
 			"Name": "ModelingToolsEditorMode",
 			"Enabled": true,
 			"TargetAllowList": [

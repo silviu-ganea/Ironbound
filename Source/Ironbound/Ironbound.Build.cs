@@ -16,6 +16,7 @@ public class Ironbound : ModuleRules
 				"CoreUObject",
 				"Engine",
 				"AIModule",
+				"PhysicsControl",
 			});
 	}
 }

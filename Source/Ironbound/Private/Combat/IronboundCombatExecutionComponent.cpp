@@ -1,5 +1,6 @@
 #include "Combat/IronboundCombatExecutionComponent.h"
 #include "Combat/IronboundEquipmentComponent.h"
+#include "Combat/IronboundCombatFocusComponent.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -17,7 +18,11 @@ UIronboundCombatExecutionComponent::UIronboundCombatExecutionComponent()
 
 FVector UIronboundCombatExecutionComponent::ResolveOrientationIntent(FVector LocomotionIntent) const
 {
-	return Phase == EIronboundAttackPhase::Aligning || IsCommitted() ? DesiredFacing : LocomotionIntent;
+	if (Phase == EIronboundAttackPhase::Aligning || Phase == EIronboundAttackPhase::Committed) return DesiredFacing;
+	const auto* Focus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+	if (const AActor* Target = Focus ? Focus->GetCombatTarget() : nullptr)
+		return (Target->GetActorLocation() - GetOwner()->GetActorLocation()).GetSafeNormal2D();
+	return LocomotionIntent;
 }
 
 bool UIronboundCombatExecutionComponent::PrepareAttack(USkeletalMeshComponent* TargetMesh,
@@ -29,7 +34,8 @@ bool UIronboundCombatExecutionComponent::PrepareAttack(USkeletalMeshComponent* T
 	auto* Pawn = Cast<APawn>(GetOwner());
 	auto* AI = Pawn ? Cast<AAIController>(Pawn->GetController()) : nullptr;
 	auto* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
-	if (!AI || !TargetMesh || TargetMesh->GetOwner() == GetOwner() || !Equipment)
+	const auto* Focus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+	if (!AI || !TargetMesh || !Focus || !Focus->IsEnemy(TargetMesh->GetOwner()) || !Equipment)
 	{
 		CancelAttack();
 		return false;
