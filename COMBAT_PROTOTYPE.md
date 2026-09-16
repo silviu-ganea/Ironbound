@@ -1,3 +1,17 @@
+## Combat equipment and attack execution refactor — 2026-09-16
+
+Current implementation details and measured results are in [COMBAT_ARCHITECTURE.md](COMBAT_ARCHITECTURE.md). This section supersedes older descriptions of attack setup and the completed stationary duel; those remain as historical findings.
+
+- Restored the committed sword grip using authored weapon data: hand-relative (-7.5, 2, 0) cm, 180-degree pitch. Equipment setup now happens on equip, not every attack; prediction uses the same authored grip instead of live physics displacement.
+- Added runtime equipment and combat-execution components. Mover owns rotation through orientation intent; execution owns approach/alignment/commit/recovery and validates actual-pose contact before committing.
+- Corrected the trajectory solver's squared-versus-linear tolerance comparison and candidate bookkeeping. Isolated animation sampling now explicitly updates animation before reading the evaluated pose.
+- Reconnected attack commitment, implemented the formerly empty strike-window notify, and restored the disconnected health-bar/death flow. Passive targets without controllers are supported by the death path.
+- The current map is deliberately Pawn0 versus passive Pawn1 (teams 1 and 2); Team 0 remains the observer. Pawn1's disabled AI possession was preserved.
+- PIE recording: Pawn0 closed from 2,000 cm, delivered ten 10-damage hits, Pawn1 died, and Pawn0 returned to idle. Observer remained at 1,000 health. Maximum committed yaw error 2.496 degrees on the first swing, approximately zero thereafter. Idle unequip/re-equip and observer attack/damage rejection passed.
+- This validates the requested one-attacker scenario, not a completed tactical AI architecture. Contact prediction is still a coarse bone/capsule surface proxy; injury, stamina, dodging, body-shape prediction and victim-owned reaction policy remain future work. See the architecture document for precise limits and extension points.
+
+---
+
 \# IRONBOUND — Combat Prototype Roadmap
 
 
