@@ -31,7 +31,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Tracking") float WeaponTrackingStrength = 60.f;
 	/** Accommodate authored poses within living joint limits; restore the asset's limits on death. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Tracking") bool bFitJointLimitsToAnimation = true;
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Reaction") float RecoveryDuration = 0.65f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Reaction") float RecoveryDuration = 1.25f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Reaction") float MaxReactionSpeed = 180.f;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat|Reaction") float ReactionWeight = 0.f;
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat|Reaction") int32 ReactionCount = 0;
@@ -52,6 +52,8 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UPhysicsControlComponent> PhysicsControls;
 	TArray<FName> UpperBodyBones;
 	TArray<FName> WeaponArmBones;
+	TArray<FName> ReactionWorldControls;
+	TArray<FName> ReactionParentControls;
 	float ReactionTimeRemaining = 0.f;
 	bool bReleased = false;
 	void UpdateDrives();
