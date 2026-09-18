@@ -22,20 +22,20 @@ UIronboundCombatExecutionComponent::UIronboundCombatExecutionComponent()
 // Orientation
 // ============================================================================
 
-FVector UIronboundCombatExecutionComponent::ResolveOrientationIntent(FVector LocomotionIntent) const
+FVector UIronboundCombatExecutionComponent::ResolveOrientationIntent(
+	FVector LocomotionIntent) const
 {
-	FVector OrientationIntent = LocomotionIntent;
-
-	if (IsAligningOrCommitted())
+	if (!AttackFacingIntent.IsNearlyZero())
 	{
-		OrientationIntent = AttackFacingIntent;
-	}
-	else if (HasTarget())
-	{
-		OrientationIntent = GetTargetFacingIntent();
+		return AttackFacingIntent;
 	}
 
-	return OrientationIntent;
+	if (HasTarget())
+	{
+		return GetTargetFacingIntent();
+	}
+
+	return LocomotionIntent;
 }
 
 
@@ -43,7 +43,13 @@ FVector UIronboundCombatExecutionComponent::GetTargetFacingIntent() const
 {
 	const AActor* Target = GetCombatFocus()->GetCombatTarget();
 
-	return (Target->GetActorLocation() - GetOwner()->GetActorLocation()).GetSafeNormal2D();
+	const FVector OwnerLocation = GetOwner()->GetActorLocation();
+	const FVector TargetLocation = Target->GetActorLocation();
+
+	const FVector TargetFacingIntent =
+		(TargetLocation - OwnerLocation).GetSafeNormal2D();
+
+	return TargetFacingIntent;
 }
 
 
@@ -58,7 +64,8 @@ bool UIronboundCombatExecutionComponent::HasTarget() const
 bool UIronboundCombatExecutionComponent::IsAligningOrCommitted() const
 {
 	return Phase == EIronboundAttackPhase::Aligning ||
-		   Phase == EIronboundAttackPhase::Committed;
+		   Phase == EIronboundAttackPhase::Committed ||
+		   Phase == EIronboundAttackPhase::Recovery;
 }
 
 
@@ -71,7 +78,8 @@ float UIronboundCombatExecutionComponent::GetCombatFacingDelta() const
 		const float CurrentYaw = GetOwner()->GetActorRotation().Yaw;
 		const float AttackYaw = AttackFacingIntent.Rotation().Yaw;
 
-		FacingDelta = FMath::FindDeltaAngleDegrees(CurrentYaw, AttackYaw);
+		FacingDelta =
+			FMath::FindDeltaAngleDegrees(CurrentYaw, AttackYaw);
 	}
 
 	return FacingDelta;
@@ -129,13 +137,22 @@ bool UIronboundCombatExecutionComponent::PrepareAttack(
 
 	FBladeTrajectory Trajectory;
 
-	if (!BuildAttackTrajectory(Sequence, StartTime, EndTime, NumSamples, Trajectory))
+	if (!BuildAttackTrajectory(
+		Sequence,
+		StartTime,
+		EndTime,
+		NumSamples,
+		Trajectory))
 	{
 		CancelAttack();
 		return false;
 	}
 
-	if (!SolveAttackPlan(TargetMesh, Trajectory, AllowedBones, AcceptanceRadius))
+	if (!SolveAttackPlan(
+		TargetMesh,
+		Trajectory,
+		AllowedBones,
+		AcceptanceRadius))
 	{
 		CancelAttack();
 		return false;
@@ -228,9 +245,10 @@ bool UIronboundCombatExecutionComponent::SolveAttackPlan(
 
 bool UIronboundCombatExecutionComponent::IsAtAttackPosition() const
 {
-	const float DistanceToAttackPosition = FVector::Dist2D(
-		GetOwner()->GetActorLocation(),
-		PlannedTransform.GetLocation());
+	const float DistanceToAttackPosition =
+		FVector::Dist2D(
+			GetOwner()->GetActorLocation(),
+			PlannedTransform.GetLocation());
 
 	return DistanceToAttackPosition <= ArrivalTolerance;
 }
@@ -271,12 +289,16 @@ void UIronboundCombatExecutionComponent::AlignAttack(
 
 	Phase = EIronboundAttackPhase::Aligning;
 
-	AttackFacingIntent = PlannedTransform.GetRotation().GetForwardVector();
+	// This becomes our persistent combat facing.
+	// It is NOT cleared when the attack/recovery finishes.
+	AttackFacingIntent =
+		PlannedTransform.GetRotation().GetForwardVector();
 
-	FacingErrorDegrees = FMath::Abs(
-		FMath::FindDeltaAngleDegrees(
-			GetOwner()->GetActorRotation().Yaw,
-			PlannedTransform.Rotator().Yaw));
+	FacingErrorDegrees =
+		FMath::Abs(
+			FMath::FindDeltaAngleDegrees(
+				GetOwner()->GetActorRotation().Yaw,
+				PlannedTransform.Rotator().Yaw));
 
 	FName Bone;
 	int32 Sample;
@@ -292,7 +314,8 @@ void UIronboundCombatExecutionComponent::AlignAttack(
 }
 
 
-bool UIronboundCombatExecutionComponent::IsReadyToCommit(float AcceptanceRadius) const
+bool UIronboundCombatExecutionComponent::IsReadyToCommit(
+	float AcceptanceRadius) const
 {
 	return FacingErrorDegrees <= FacingTolerance &&
 		   MeasuredSpeed <= SettledSpeed &&
@@ -328,7 +351,9 @@ void UIronboundCombatExecutionComponent::CommitAttack(
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("Attack committed: %s yaw=%.2f desired=%.2f error=%.2f actual-pose-contact=%.2f"),
+		TEXT(
+			"Attack committed: %s yaw=%.2f desired=%.2f "
+			"error=%.2f actual-pose-contact=%.2f"),
 		*GetNameSafe(GetOwner()),
 		GetOwner()->GetActorRotation().Yaw,
 		PlannedTransform.Rotator().Yaw,
@@ -351,13 +376,17 @@ void UIronboundCombatExecutionComponent::FinishAttack()
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("Attack finished: %s maximum facing error %.3f degrees"),
+		TEXT(
+			"Attack finished: %s maximum facing error %.3f degrees"),
 		*GetNameSafe(GetOwner()),
 		MaxCommittedFacingError);
 
 	Phase = EIronboundAttackPhase::Recovery;
 	bStrikeWindowOpen = false;
-	RecoveryUntil = GetWorld()->GetTimeSeconds() + RecoverySeconds;
+
+	RecoveryUntil =
+		GetWorld()->GetTimeSeconds() + RecoverySeconds;
+
 	bHasPreviousTip = false;
 }
 
@@ -373,6 +402,11 @@ void UIronboundCombatExecutionComponent::CancelAttack()
 	bStrikeWindowOpen = false;
 	PlannedTarget.Reset();
 	bHasPreviousTip = false;
+
+	// Deliberately DO NOT clear AttackFacingIntent here.
+	//
+	// Ending an attack must not implicitly change the fighter's facing.
+	// A later combat decision may deliberately choose a new facing.
 }
 
 
@@ -385,7 +419,10 @@ void UIronboundCombatExecutionComponent::TickComponent(
 	ELevelTick TickType,
 	FActorComponentTickFunction* ThisTickFunction)
 {
-	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
+	Super::TickComponent(
+		DeltaTime,
+		TickType,
+		ThisTickFunction);
 
 	UpdateMeasuredSpeed(DeltaTime);
 
@@ -404,19 +441,25 @@ void UIronboundCombatExecutionComponent::TickComponent(
 }
 
 
-void UIronboundCombatExecutionComponent::UpdateMeasuredSpeed(float DeltaTime)
+void UIronboundCombatExecutionComponent::UpdateMeasuredSpeed(
+	float DeltaTime)
 {
-	const FVector CurrentLocation = GetOwner()->GetActorLocation();
+	const FVector CurrentLocation =
+		GetOwner()->GetActorLocation();
 
-	MeasuredSpeed = DeltaTime > SMALL_NUMBER
-		? FVector::Dist2D(CurrentLocation, LastLocation) / DeltaTime
-		: 0.f;
+	MeasuredSpeed =
+		DeltaTime > SMALL_NUMBER
+			? FVector::Dist2D(
+				CurrentLocation,
+				LastLocation) / DeltaTime
+			: 0.f;
 
 	LastLocation = CurrentLocation;
 }
 
 
-bool UIronboundCombatExecutionComponent::HasAttackTimedOut(float Now) const
+bool UIronboundCombatExecutionComponent::HasAttackTimedOut(
+	float Now) const
 {
 	const bool bRecoveryFinished =
 		Phase == EIronboundAttackPhase::Recovery &&
@@ -429,7 +472,8 @@ bool UIronboundCombatExecutionComponent::HasAttackTimedOut(float Now) const
 	const bool bPreparationExpired =
 		(Phase == EIronboundAttackPhase::Approaching ||
 		 Phase == EIronboundAttackPhase::Aligning) &&
-		(Now - LastRequestTime > 1.5f || !PlannedTarget.IsValid());
+		(Now - LastRequestTime > 1.5f ||
+		 !PlannedTarget.IsValid());
 
 	return bRecoveryFinished ||
 		   bCommitExpired ||
@@ -439,13 +483,16 @@ bool UIronboundCombatExecutionComponent::HasAttackTimedOut(float Now) const
 
 void UIronboundCombatExecutionComponent::UpdateCommittedFacingError()
 {
-	const float CurrentFacingError = FMath::Abs(
-		FMath::FindDeltaAngleDegrees(
-			GetOwner()->GetActorRotation().Yaw,
-			PlannedTransform.Rotator().Yaw));
+	const float CurrentFacingError =
+		FMath::Abs(
+			FMath::FindDeltaAngleDegrees(
+				GetOwner()->GetActorRotation().Yaw,
+				PlannedTransform.Rotator().Yaw));
 
 	MaxCommittedFacingError =
-		FMath::Max(MaxCommittedFacingError, CurrentFacingError);
+		FMath::Max(
+			MaxCommittedFacingError,
+			CurrentFacingError);
 }
 
 
@@ -475,7 +522,9 @@ void UIronboundCombatExecutionComponent::DrawAttackDebug()
 
 void UIronboundCombatExecutionComponent::DrawIntendedBladeTrajectory()
 {
-	for (int32 I = 1; I < CommittedTrajectory.Segments.Num(); ++I)
+	for (int32 I = 1;
+		 I < CommittedTrajectory.Segments.Num();
+		 ++I)
 	{
 		const FVector Start =
 			CommittedTransform.TransformPosition(
@@ -500,7 +549,8 @@ void UIronboundCombatExecutionComponent::DrawIntendedBladeTrajectory()
 
 void UIronboundCombatExecutionComponent::DrawActualBladeTrajectory()
 {
-	const UIronboundEquipmentComponent* Equipment = GetEquipment();
+	const UIronboundEquipmentComponent* Equipment =
+		GetEquipment();
 
 	if (!Equipment ||
 		!Equipment->bReady ||
@@ -511,8 +561,10 @@ void UIronboundCombatExecutionComponent::DrawActualBladeTrajectory()
 	}
 
 	const FVector Tip =
-		Equipment->GetWeapon()->GetComponentTransform().TransformPosition(
-			Equipment->Definition->BladeTip);
+		Equipment->GetWeapon()
+			->GetComponentTransform()
+			.TransformPosition(
+				Equipment->Definition->BladeTip);
 
 	if (bHasPreviousTip)
 	{
@@ -538,7 +590,8 @@ void UIronboundCombatExecutionComponent::DrawActualBladeTrajectory()
 
 AAIController* UIronboundCombatExecutionComponent::GetAIController() const
 {
-	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const APawn* Pawn =
+		Cast<APawn>(GetOwner());
 
 	return Pawn
 		? Cast<AAIController>(Pawn->GetController())
@@ -546,13 +599,17 @@ AAIController* UIronboundCombatExecutionComponent::GetAIController() const
 }
 
 
-UIronboundEquipmentComponent* UIronboundCombatExecutionComponent::GetEquipment() const
+UIronboundEquipmentComponent*
+UIronboundCombatExecutionComponent::GetEquipment() const
 {
-	return GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+	return GetOwner()
+		->FindComponentByClass<UIronboundEquipmentComponent>();
 }
 
 
-UIronboundCombatFocusComponent* UIronboundCombatExecutionComponent::GetCombatFocus() const
+UIronboundCombatFocusComponent*
+UIronboundCombatExecutionComponent::GetCombatFocus() const
 {
-	return GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+	return GetOwner()
+		->FindComponentByClass<UIronboundCombatFocusComponent>();
 }

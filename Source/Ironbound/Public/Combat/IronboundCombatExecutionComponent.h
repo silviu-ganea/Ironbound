@@ -189,7 +189,7 @@ private:
 	FBladeTrajectory CommittedTrajectory;
 	FTransform CommittedTransform;
 
-	FVector AttackFacingIntent = FVector::ForwardVector;
+	FVector AttackFacingIntent = FVector::ZeroVector;
 	FVector PreviousTip = FVector::ZeroVector;
 	FVector LastLocation = FVector::ZeroVector;
 
