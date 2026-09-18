@@ -5,8 +5,12 @@
 #include "Combat/IronboundTrajectoryLibrary.h"
 #include "IronboundCombatExecutionComponent.generated.h"
 
+class AAIController;
 class USkeletalMeshComponent;
 class UAnimSequenceBase;
+class UIronboundEquipmentComponent;
+class UIronboundCombatFocusComponent;
+
 
 UENUM(BlueprintType)
 enum class EIronboundAttackPhase : uint8
@@ -18,6 +22,7 @@ enum class EIronboundAttackPhase : uint8
 	Recovery
 };
 
+
 /** Movement/action arbitration. AI selects a target and move; this component executes the request. */
 UCLASS(ClassGroup=(Ironbound), meta=(BlueprintSpawnableComponent))
 class IRONBOUND_API UIronboundCombatExecutionComponent : public UActorComponent
@@ -26,6 +31,8 @@ class IRONBOUND_API UIronboundCombatExecutionComponent : public UActorComponent
 
 public:
 	UIronboundCombatExecutionComponent();
+
+	// State
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	EIronboundAttackPhase Phase = EIronboundAttackPhase::Idle;
@@ -45,6 +52,9 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	float MaxCommittedFacingError = 0.f;
 
+
+	// Settings
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat", meta=(ClampMin="0.1"))
 	float ArrivalTolerance = 8.f;
 
@@ -59,6 +69,9 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat")
 	bool bDrawActualBlade = true;
+
+
+	// Attack
 
 	/** Returns true once, only after the ACTUAL pose is aligned, stopped and predicts contact. */
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
@@ -82,65 +95,108 @@ public:
 	void CancelAttack();
 
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
-	bool CanPlayAttack() const
-	{
-		return Phase == EIronboundAttackPhase::Committed;
-	}
+	bool CanPlayAttack() const;
 
 	/** Authoritative busy state, including recovery; legacy animation flags must not gate new requests. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
-	bool IsCommitted() const
-	{
-		return Phase == EIronboundAttackPhase::Committed ||
-			   Phase == EIronboundAttackPhase::Recovery;
-	}
+	bool IsCommitted() const;
 
 	/** True while the fighter is at the attack stance but still needs to establish attack facing. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
-	bool IsAligning() const
-	{
-		return Phase == EIronboundAttackPhase::Aligning;
-	}
+	bool IsAligning() const;
 
-	/**
-	 * Signed yaw from the actor's current facing to the trajectory solver's desired attack facing.
-	 * Positive/negative preserves left/right so animation can choose the correct turn.
-	 */
+	/** Signed yaw from current facing to the planned attack facing. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
-	float GetCombatFacingDelta() const
-	{
-		if (Phase != EIronboundAttackPhase::Aligning)
-		{
-			return 0.f;
-		}
+	float GetCombatFacingDelta() const;
 
-		const AActor* Owner = GetOwner();
-		if (!Owner || DesiredFacing.IsNearlyZero())
-		{
-			return 0.f;
-		}
 
-		const float CurrentYaw = Owner->GetActorRotation().Yaw;
-		const float DesiredYaw = DesiredFacing.Rotation().Yaw;
-
-		return FMath::FindDeltaAngleDegrees(CurrentYaw, DesiredYaw);
-	}
+	// Tick
 
 	virtual void TickComponent(
 		float DeltaTime,
 		ELevelTick TickType,
 		FActorComponentTickFunction* ThisTickFunction) override;
 
+
 private:
+
+	// State queries
+
+	bool IsAligningOrCommitted() const;
+	bool HasTarget() const;
+	bool HasAttackTimedOut(float Now) const;
+	bool IsAtAttackPosition() const;
+	bool IsReadyToCommit(float AcceptanceRadius) const;
+
+
+	// Orientation
+
+	FVector GetTargetFacingIntent() const;
+
+
+	// Attack preparation
+
+	bool IsValidAttackRequest(USkeletalMeshComponent* TargetMesh) const;
+
+	bool BuildAttackTrajectory(
+		UAnimSequenceBase* Sequence,
+		float StartTime,
+		float EndTime,
+		int32 NumSamples,
+		FBladeTrajectory& OutTrajectory) const;
+
+	bool SolveAttackPlan(
+		USkeletalMeshComponent* TargetMesh,
+		const FBladeTrajectory& Trajectory,
+		const TArray<FName>& AllowedBones,
+		float AcceptanceRadius);
+
+	void ApproachAttackPosition();
+	void AlignAttack(
+		USkeletalMeshComponent* TargetMesh,
+		const FBladeTrajectory& Trajectory,
+		const TArray<FName>& AllowedBones);
+
+	void CommitAttack(
+		UAnimSequenceBase* Sequence,
+		const FBladeTrajectory& Trajectory);
+
+
+	// Tick updates
+
+	void UpdateMeasuredSpeed(float DeltaTime);
+	void UpdateCommittedFacingError();
+
+
+	// Debug
+
+	void DrawAttackDebug();
+	void DrawIntendedBladeTrajectory();
+	void DrawActualBladeTrajectory();
+
+
+	// Components
+
+	AAIController* GetAIController() const;
+	UIronboundEquipmentComponent* GetEquipment() const;
+	UIronboundCombatFocusComponent* GetCombatFocus() const;
+
+
+	// Internal state
+
 	TWeakObjectPtr<AActor> PlannedTarget;
+
 	FBladeTrajectory CommittedTrajectory;
 	FTransform CommittedTransform;
-	FVector DesiredFacing = FVector::ForwardVector;
+
+	FVector AttackFacingIntent = FVector::ForwardVector;
 	FVector PreviousTip = FVector::ZeroVector;
 	FVector LastLocation = FVector::ZeroVector;
+
 	float MeasuredSpeed = 0.f;
 	float RecoveryUntil = 0.f;
 	float CommitDeadline = 0.f;
 	float LastRequestTime = 0.f;
+
 	bool bHasPreviousTip = false;
 };

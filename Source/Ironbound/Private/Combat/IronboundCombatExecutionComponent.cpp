@@ -10,134 +10,549 @@
 #include "DrawDebugHelpers.h"
 #include "Ironbound.h"
 
+
 UIronboundCombatExecutionComponent::UIronboundCombatExecutionComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
 	PrimaryComponentTick.TickGroup = TG_PostPhysics;
 }
 
+
+// ============================================================================
+// Orientation
+// ============================================================================
+
 FVector UIronboundCombatExecutionComponent::ResolveOrientationIntent(FVector LocomotionIntent) const
 {
-	if (Phase == EIronboundAttackPhase::Aligning || Phase == EIronboundAttackPhase::Committed) return DesiredFacing;
-	const auto* Focus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
-	if (const AActor* Target = Focus ? Focus->GetCombatTarget() : nullptr)
-		return (Target->GetActorLocation() - GetOwner()->GetActorLocation()).GetSafeNormal2D();
-	return LocomotionIntent;
+	FVector OrientationIntent = LocomotionIntent;
+
+	if (IsAligningOrCommitted())
+	{
+		OrientationIntent = AttackFacingIntent;
+	}
+	else if (HasTarget())
+	{
+		OrientationIntent = GetTargetFacingIntent();
+	}
+
+	return OrientationIntent;
 }
 
-bool UIronboundCombatExecutionComponent::PrepareAttack(USkeletalMeshComponent* TargetMesh,
-	UAnimSequenceBase* Sequence, float StartTime, float EndTime, int32 NumSamples,
-	const TArray<FName>& AllowedBones, float AcceptanceRadius)
+
+FVector UIronboundCombatExecutionComponent::GetTargetFacingIntent() const
+{
+	const AActor* Target = GetCombatFocus()->GetCombatTarget();
+
+	return (Target->GetActorLocation() - GetOwner()->GetActorLocation()).GetSafeNormal2D();
+}
+
+
+bool UIronboundCombatExecutionComponent::HasTarget() const
+{
+	const UIronboundCombatFocusComponent* Focus = GetCombatFocus();
+
+	return Focus && Focus->GetCombatTarget();
+}
+
+
+bool UIronboundCombatExecutionComponent::IsAligningOrCommitted() const
+{
+	return Phase == EIronboundAttackPhase::Aligning ||
+		   Phase == EIronboundAttackPhase::Committed;
+}
+
+
+float UIronboundCombatExecutionComponent::GetCombatFacingDelta() const
+{
+	float FacingDelta = 0.f;
+
+	if (IsAligning() && !AttackFacingIntent.IsNearlyZero())
+	{
+		const float CurrentYaw = GetOwner()->GetActorRotation().Yaw;
+		const float AttackYaw = AttackFacingIntent.Rotation().Yaw;
+
+		FacingDelta = FMath::FindDeltaAngleDegrees(CurrentYaw, AttackYaw);
+	}
+
+	return FacingDelta;
+}
+
+
+// ============================================================================
+// State
+// ============================================================================
+
+bool UIronboundCombatExecutionComponent::CanPlayAttack() const
+{
+	return Phase == EIronboundAttackPhase::Committed;
+}
+
+
+bool UIronboundCombatExecutionComponent::IsCommitted() const
+{
+	return Phase == EIronboundAttackPhase::Committed ||
+		   Phase == EIronboundAttackPhase::Recovery;
+}
+
+
+bool UIronboundCombatExecutionComponent::IsAligning() const
+{
+	return Phase == EIronboundAttackPhase::Aligning;
+}
+
+
+// ============================================================================
+// Attack preparation
+// ============================================================================
+
+bool UIronboundCombatExecutionComponent::PrepareAttack(
+	USkeletalMeshComponent* TargetMesh,
+	UAnimSequenceBase* Sequence,
+	float StartTime,
+	float EndTime,
+	int32 NumSamples,
+	const TArray<FName>& AllowedBones,
+	float AcceptanceRadius)
 {
 	LastRequestTime = GetWorld()->GetTimeSeconds();
-	if (IsCommitted()) return false;
-	auto* Pawn = Cast<APawn>(GetOwner());
-	auto* AI = Pawn ? Cast<AAIController>(Pawn->GetController()) : nullptr;
-	auto* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
-	const auto* Focus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
-	if (!AI || !TargetMesh || !Focus || !Focus->IsEnemy(TargetMesh->GetOwner()) || !Equipment)
+
+	if (IsCommitted())
+	{
+		return false;
+	}
+
+	if (!IsValidAttackRequest(TargetMesh))
 	{
 		CancelAttack();
 		return false;
 	}
+
 	FBladeTrajectory Trajectory;
-	if (!Equipment->GetTrajectory(Sequence, StartTime, EndTime, NumSamples, Trajectory))
+
+	if (!BuildAttackTrajectory(Sequence, StartTime, EndTime, NumSamples, Trajectory))
 	{
 		CancelAttack();
 		return false;
 	}
+
+	if (!SolveAttackPlan(TargetMesh, Trajectory, AllowedBones, AcceptanceRadius))
+	{
+		CancelAttack();
+		return false;
+	}
+
+	if (!IsAtAttackPosition())
+	{
+		ApproachAttackPosition();
+		return false;
+	}
+
+	AlignAttack(TargetMesh, Trajectory, AllowedBones);
+
+	if (!IsReadyToCommit(AcceptanceRadius))
+	{
+		return false;
+	}
+
+	CommitAttack(Sequence, Trajectory);
+
+	return true;
+}
+
+
+bool UIronboundCombatExecutionComponent::IsValidAttackRequest(
+	USkeletalMeshComponent* TargetMesh) const
+{
+	const UIronboundCombatFocusComponent* Focus = GetCombatFocus();
+
+	return GetAIController() &&
+		   TargetMesh &&
+		   Focus &&
+		   Focus->IsEnemy(TargetMesh->GetOwner()) &&
+		   GetEquipment();
+}
+
+
+bool UIronboundCombatExecutionComponent::BuildAttackTrajectory(
+	UAnimSequenceBase* Sequence,
+	float StartTime,
+	float EndTime,
+	int32 NumSamples,
+	FBladeTrajectory& OutTrajectory) const
+{
+	return GetEquipment()->GetTrajectory(
+		Sequence,
+		StartTime,
+		EndTime,
+		NumSamples,
+		OutTrajectory);
+}
+
+
+bool UIronboundCombatExecutionComponent::SolveAttackPlan(
+	USkeletalMeshComponent* TargetMesh,
+	const FBladeTrajectory& Trajectory,
+	const TArray<FName>& AllowedBones,
+	float AcceptanceRadius)
+{
 	FName Bone;
 	int32 Sample;
 	float PlannedDistance;
 	FTransform Candidate;
-	if (!UIronboundTrajectoryLibrary::SolveAttackAlignment(Equipment->GetFighterMesh(), TargetMesh,
-		Trajectory, AllowedBones, AcceptanceRadius, Candidate, Bone, Sample, PlannedDistance))
+
+	const bool bFoundAttackPlan =
+		UIronboundTrajectoryLibrary::SolveAttackAlignment(
+			GetEquipment()->GetFighterMesh(),
+			TargetMesh,
+			Trajectory,
+			AllowedBones,
+			AcceptanceRadius,
+			Candidate,
+			Bone,
+			Sample,
+			PlannedDistance);
+
+	if (bFoundAttackPlan)
 	{
-		CancelAttack(); // An unreachable body region must not turn into permission to swing.
-		return false;
+		PlannedTarget = TargetMesh->GetOwner();
+		PlannedTransform = Candidate;
 	}
-	PlannedTarget = TargetMesh->GetOwner();
-	PlannedTransform = Candidate;
-	const float DistanceToStance = FVector::Dist2D(GetOwner()->GetActorLocation(), Candidate.GetLocation());
-	if (DistanceToStance > ArrivalTolerance)
+
+	return bFoundAttackPlan;
+}
+
+
+// ============================================================================
+// Approach
+// ============================================================================
+
+bool UIronboundCombatExecutionComponent::IsAtAttackPosition() const
+{
+	const float DistanceToAttackPosition = FVector::Dist2D(
+		GetOwner()->GetActorLocation(),
+		PlannedTransform.GetLocation());
+
+	return DistanceToAttackPosition <= ArrivalTolerance;
+}
+
+
+void UIronboundCombatExecutionComponent::ApproachAttackPosition()
+{
+	Phase = EIronboundAttackPhase::Approaching;
+
+	const EPathFollowingRequestResult::Type Result =
+		GetAIController()->MoveToLocation(
+			PlannedTransform.GetLocation(),
+			ArrivalTolerance * 0.5f,
+			false,
+			true,
+			true,
+			true,
+			nullptr,
+			false);
+
+	if (Result == EPathFollowingRequestResult::Failed)
 	{
-		Phase = EIronboundAttackPhase::Approaching;
-		const auto Result = AI->MoveToLocation(Candidate.GetLocation(), ArrivalTolerance * 0.5f,
-			false, true, true, true, nullptr, false);
-		if (Result == EPathFollowingRequestResult::Failed) CancelAttack();
-		return false;
+		CancelAttack();
 	}
-	AI->StopMovement();
+}
+
+
+// ============================================================================
+// Alignment
+// ============================================================================
+
+void UIronboundCombatExecutionComponent::AlignAttack(
+	USkeletalMeshComponent* TargetMesh,
+	const FBladeTrajectory& Trajectory,
+	const TArray<FName>& AllowedBones)
+{
+	GetAIController()->StopMovement();
+
 	Phase = EIronboundAttackPhase::Aligning;
-	DesiredFacing = Candidate.GetRotation().GetForwardVector();
-	FacingErrorDegrees = FMath::Abs(FMath::FindDeltaAngleDegrees(GetOwner()->GetActorRotation().Yaw,
-		Candidate.Rotator().Yaw));
-	CurrentPredictedDistance = UIronboundTrajectoryLibrary::EvaluateContact(Trajectory,
-		GetOwner()->GetActorTransform(), TargetMesh, AllowedBones, Bone, Sample);
-	if (FacingErrorDegrees > FacingTolerance || MeasuredSpeed > SettledSpeed ||
-		CurrentPredictedDistance > AcceptanceRadius) return false;
+
+	AttackFacingIntent = PlannedTransform.GetRotation().GetForwardVector();
+
+	FacingErrorDegrees = FMath::Abs(
+		FMath::FindDeltaAngleDegrees(
+			GetOwner()->GetActorRotation().Yaw,
+			PlannedTransform.Rotator().Yaw));
+
+	FName Bone;
+	int32 Sample;
+
+	CurrentPredictedDistance =
+		UIronboundTrajectoryLibrary::EvaluateContact(
+			Trajectory,
+			GetOwner()->GetActorTransform(),
+			TargetMesh,
+			AllowedBones,
+			Bone,
+			Sample);
+}
+
+
+bool UIronboundCombatExecutionComponent::IsReadyToCommit(float AcceptanceRadius) const
+{
+	return FacingErrorDegrees <= FacingTolerance &&
+		   MeasuredSpeed <= SettledSpeed &&
+		   CurrentPredictedDistance <= AcceptanceRadius;
+}
+
+
+// ============================================================================
+// Commitment
+// ============================================================================
+
+void UIronboundCombatExecutionComponent::CommitAttack(
+	UAnimSequenceBase* Sequence,
+	const FBladeTrajectory& Trajectory)
+{
 	Phase = EIronboundAttackPhase::Committed;
 	bStrikeWindowOpen = false;
+
 	CommittedTrajectory = Trajectory;
 	CommittedTransform = GetOwner()->GetActorTransform();
+
 	MaxCommittedFacingError = FacingErrorDegrees;
-	// Montage completion/interruption is primary; deadline prevents a failed playback locking AI forever.
-	CommitDeadline = LastRequestTime + Sequence->GetPlayLength() + 2.f;
+
+	// Montage completion/interruption is primary.
+	// Deadline prevents failed playback from locking the AI forever.
+	CommitDeadline =
+		LastRequestTime +
+		Sequence->GetPlayLength() +
+		2.f;
+
 	bHasPreviousTip = false;
-	UE_LOG(LogIronboundCombat, Log, TEXT("Attack committed: %s yaw=%.2f desired=%.2f error=%.2f actual-pose-contact=%.2f"),
-		*GetNameSafe(GetOwner()), GetOwner()->GetActorRotation().Yaw, Candidate.Rotator().Yaw,
-		FacingErrorDegrees, CurrentPredictedDistance);
-	return true;
+
+	UE_LOG(
+		LogIronboundCombat,
+		Log,
+		TEXT("Attack committed: %s yaw=%.2f desired=%.2f error=%.2f actual-pose-contact=%.2f"),
+		*GetNameSafe(GetOwner()),
+		GetOwner()->GetActorRotation().Yaw,
+		PlannedTransform.Rotator().Yaw,
+		FacingErrorDegrees,
+		CurrentPredictedDistance);
 }
+
+
+// ============================================================================
+// Finish / Cancel
+// ============================================================================
 
 void UIronboundCombatExecutionComponent::FinishAttack()
 {
-	if (Phase != EIronboundAttackPhase::Committed) return;
-	UE_LOG(LogIronboundCombat, Log, TEXT("Attack finished: %s maximum facing error %.3f degrees"),
-		*GetNameSafe(GetOwner()), MaxCommittedFacingError);
+	if (Phase != EIronboundAttackPhase::Committed)
+	{
+		return;
+	}
+
+	UE_LOG(
+		LogIronboundCombat,
+		Log,
+		TEXT("Attack finished: %s maximum facing error %.3f degrees"),
+		*GetNameSafe(GetOwner()),
+		MaxCommittedFacingError);
+
 	Phase = EIronboundAttackPhase::Recovery;
 	bStrikeWindowOpen = false;
 	RecoveryUntil = GetWorld()->GetTimeSeconds() + RecoverySeconds;
 	bHasPreviousTip = false;
 }
 
+
 void UIronboundCombatExecutionComponent::CancelAttack()
 {
-	if (auto* Pawn = Cast<APawn>(GetOwner()))
-		if (auto* AI = Cast<AAIController>(Pawn->GetController())) AI->StopMovement();
+	if (AAIController* AI = GetAIController())
+	{
+		AI->StopMovement();
+	}
+
 	Phase = EIronboundAttackPhase::Idle;
 	bStrikeWindowOpen = false;
 	PlannedTarget.Reset();
 	bHasPreviousTip = false;
 }
 
-void UIronboundCombatExecutionComponent::TickComponent(float DeltaTime, ELevelTick TickType,
+
+// ============================================================================
+// Tick
+// ============================================================================
+
+void UIronboundCombatExecutionComponent::TickComponent(
+	float DeltaTime,
+	ELevelTick TickType,
 	FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
-	const FVector Location = GetOwner()->GetActorLocation();
-	MeasuredSpeed = DeltaTime > SMALL_NUMBER ? FVector::Dist2D(Location, LastLocation) / DeltaTime : 0.f;
-	LastLocation = Location;
+
+	UpdateMeasuredSpeed(DeltaTime);
+
 	const float Now = GetWorld()->GetTimeSeconds();
-	if ((Phase == EIronboundAttackPhase::Recovery && Now >= RecoveryUntil) ||
-		(Phase == EIronboundAttackPhase::Committed && Now >= CommitDeadline) ||
-		((Phase == EIronboundAttackPhase::Approaching || Phase == EIronboundAttackPhase::Aligning) &&
-			(Now - LastRequestTime > 1.5f || !PlannedTarget.IsValid()))) CancelAttack();
-	if (Phase != EIronboundAttackPhase::Committed) return;
-	MaxCommittedFacingError = FMath::Max(MaxCommittedFacingError,
-		float(FMath::Abs(FMath::FindDeltaAngleDegrees(GetOwner()->GetActorRotation().Yaw, PlannedTransform.Rotator().Yaw))));
-	if (!bDrawActualBlade) return;
-	// Compare the SAME strike interval: red = intended at commitment; blue = measured physical blade.
+
+	if (HasAttackTimedOut(Now))
+	{
+		CancelAttack();
+	}
+
+	if (Phase == EIronboundAttackPhase::Committed)
+	{
+		UpdateCommittedFacingError();
+		DrawAttackDebug();
+	}
+}
+
+
+void UIronboundCombatExecutionComponent::UpdateMeasuredSpeed(float DeltaTime)
+{
+	const FVector CurrentLocation = GetOwner()->GetActorLocation();
+
+	MeasuredSpeed = DeltaTime > SMALL_NUMBER
+		? FVector::Dist2D(CurrentLocation, LastLocation) / DeltaTime
+		: 0.f;
+
+	LastLocation = CurrentLocation;
+}
+
+
+bool UIronboundCombatExecutionComponent::HasAttackTimedOut(float Now) const
+{
+	const bool bRecoveryFinished =
+		Phase == EIronboundAttackPhase::Recovery &&
+		Now >= RecoveryUntil;
+
+	const bool bCommitExpired =
+		Phase == EIronboundAttackPhase::Committed &&
+		Now >= CommitDeadline;
+
+	const bool bPreparationExpired =
+		(Phase == EIronboundAttackPhase::Approaching ||
+		 Phase == EIronboundAttackPhase::Aligning) &&
+		(Now - LastRequestTime > 1.5f || !PlannedTarget.IsValid());
+
+	return bRecoveryFinished ||
+		   bCommitExpired ||
+		   bPreparationExpired;
+}
+
+
+void UIronboundCombatExecutionComponent::UpdateCommittedFacingError()
+{
+	const float CurrentFacingError = FMath::Abs(
+		FMath::FindDeltaAngleDegrees(
+			GetOwner()->GetActorRotation().Yaw,
+			PlannedTransform.Rotator().Yaw));
+
+	MaxCommittedFacingError =
+		FMath::Max(MaxCommittedFacingError, CurrentFacingError);
+}
+
+
+// ============================================================================
+// Debug
+// ============================================================================
+
+void UIronboundCombatExecutionComponent::DrawAttackDebug()
+{
+	if (!bDrawActualBlade)
+	{
+		return;
+	}
+
+	DrawIntendedBladeTrajectory();
+
+	if (bStrikeWindowOpen)
+	{
+		DrawActualBladeTrajectory();
+	}
+	else
+	{
+		bHasPreviousTip = false;
+	}
+}
+
+
+void UIronboundCombatExecutionComponent::DrawIntendedBladeTrajectory()
+{
 	for (int32 I = 1; I < CommittedTrajectory.Segments.Num(); ++I)
 	{
-		DrawDebugLine(GetWorld(), CommittedTransform.TransformPosition(CommittedTrajectory.Segments[I-1].Tip),
-			CommittedTransform.TransformPosition(CommittedTrajectory.Segments[I].Tip), FColor::Red, false, 0.f, 0, 2.f);
+		const FVector Start =
+			CommittedTransform.TransformPosition(
+				CommittedTrajectory.Segments[I - 1].Tip);
+
+		const FVector End =
+			CommittedTransform.TransformPosition(
+				CommittedTrajectory.Segments[I].Tip);
+
+		DrawDebugLine(
+			GetWorld(),
+			Start,
+			End,
+			FColor::Red,
+			false,
+			0.f,
+			0,
+			2.f);
 	}
-	if (!bStrikeWindowOpen) { bHasPreviousTip = false; return; }
-	const auto* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
-	if (!Equipment || !Equipment->bReady || !Equipment->Definition || !Equipment->GetWeapon()) return;
-	const FVector Tip = Equipment->GetWeapon()->GetComponentTransform().TransformPosition(Equipment->Definition->BladeTip);
-	if (bHasPreviousTip) DrawDebugLine(GetWorld(), PreviousTip, Tip, FColor::Blue, false, 2.f, 0, 2.f);
+}
+
+
+void UIronboundCombatExecutionComponent::DrawActualBladeTrajectory()
+{
+	const UIronboundEquipmentComponent* Equipment = GetEquipment();
+
+	if (!Equipment ||
+		!Equipment->bReady ||
+		!Equipment->Definition ||
+		!Equipment->GetWeapon())
+	{
+		return;
+	}
+
+	const FVector Tip =
+		Equipment->GetWeapon()->GetComponentTransform().TransformPosition(
+			Equipment->Definition->BladeTip);
+
+	if (bHasPreviousTip)
+	{
+		DrawDebugLine(
+			GetWorld(),
+			PreviousTip,
+			Tip,
+			FColor::Blue,
+			false,
+			2.f,
+			0,
+			2.f);
+	}
+
 	PreviousTip = Tip;
 	bHasPreviousTip = true;
+}
+
+
+// ============================================================================
+// Component access
+// ============================================================================
+
+AAIController* UIronboundCombatExecutionComponent::GetAIController() const
+{
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+
+	return Pawn
+		? Cast<AAIController>(Pawn->GetController())
+		: nullptr;
+}
+
+
+UIronboundEquipmentComponent* UIronboundCombatExecutionComponent::GetEquipment() const
+{
+	return GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+}
+
+
+UIronboundCombatFocusComponent* UIronboundCombatExecutionComponent::GetCombatFocus() const
+{
+	return GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
 }
