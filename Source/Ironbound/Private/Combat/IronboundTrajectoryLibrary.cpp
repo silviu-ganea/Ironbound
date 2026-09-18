@@ -489,9 +489,7 @@ float UIronboundTrajectoryLibrary::EvaluateContact(
 			continue;
 		}
 
-		const FVector Contact =
-			VictimMesh->GetSocketLocation(Bone) +
-			Approach * Radius;
+		const FVector Contact = VictimMesh->GetSocketLocation(Bone);
 
 		for (int32 Index = 0;
 			 Index < Trajectory.Segments.Num();
