@@ -334,12 +334,14 @@ void UIronboundParryComponent::DrawAnatomyDebug() const
 }
 
 bool UIronboundParryComponent::GetCurrentWeaponGeometry(
+    FTransform& OutCurrentWeaponTransform,
     FVector& OutCurrentBaseWorld,
     FVector& OutCurrentTipWorld,
     float& OutBladeLength,
     float& OutMinFraction,
     float& OutMaxFraction) const
 {
+    OutCurrentWeaponTransform = FTransform::Identity;
     OutCurrentBaseWorld = FVector::ZeroVector;
     OutCurrentTipWorld = FVector::ZeroVector;
     OutBladeLength = 0.f;
@@ -363,6 +365,8 @@ bool UIronboundParryComponent::GetCurrentWeaponGeometry(
     const FVector BladeBaseLocal = Equipment->Definition->BladeBase;
     const FVector BladeTipLocal = Equipment->Definition->BladeTip;
 
+    OutCurrentWeaponTransform = Weapon->GetComponentTransform();
+
     OutBladeLength = FVector::Distance(BladeBaseLocal, BladeTipLocal);
     if (OutBladeLength <= KINDA_SMALL_NUMBER)
     {
@@ -370,10 +374,10 @@ bool UIronboundParryComponent::GetCurrentWeaponGeometry(
     }
 
     OutCurrentBaseWorld =
-        Weapon->GetComponentTransform().TransformPosition(BladeBaseLocal);
+        OutCurrentWeaponTransform.TransformPosition(BladeBaseLocal);
 
     OutCurrentTipWorld =
-        Weapon->GetComponentTransform().TransformPosition(BladeTipLocal);
+        OutCurrentWeaponTransform.TransformPosition(BladeTipLocal);
 
     OutMinFraction = FMath::Clamp(MinParryBladeFraction, 0.f, 1.f);
     OutMaxFraction = FMath::Clamp(MaxParryBladeFraction, OutMinFraction, 1.f);
@@ -535,6 +539,7 @@ bool UIronboundParryComponent::EvaluateCandidate(
     const FVector& DefenseDirection,
     float DefenderBladeFraction,
     float BladeLength,
+    const FTransform& CurrentWeaponTransform,
     const FVector& CurrentDefenseBase,
     const FVector& CurrentDefenseDirection,
     FIronboundParryCandidate& OutCandidate) const
@@ -571,12 +576,67 @@ bool UIronboundParryComponent::EvaluateCandidate(
     const FVector CandidateTip =
         CandidateBase + NormalizedDefenseDirection * BladeLength;
 
+    const UIronboundEquipmentComponent* Equipment =
+        GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+
+    if (!Equipment || !Equipment->Definition)
+    {
+        return false;
+    }
+
+    const FVector BladeBaseLocal = Equipment->Definition->BladeBase;
+    const FVector BladeTipLocal = Equipment->Definition->BladeTip;
+    const FVector LocalBladeDirection =
+        (BladeTipLocal - BladeBaseLocal).GetSafeNormal();
+
+    if (LocalBladeDirection.IsNearlyZero())
+    {
+        return false;
+    }
+
+    /*
+     * A blade axis does not define weapon roll. Use the minimum world-space
+     * rotation from the weapon's CURRENT blade direction to the requested
+     * candidate direction. This aligns the blade while preserving the
+     * defender's current roll/twist as much as possible.
+     */
+    const FQuat BladeAlignment =
+        FQuat::FindBetweenNormals(
+            CurrentDefenseDirection,
+            NormalizedDefenseDirection);
+
+    const FQuat CandidateWeaponRotation =
+        (BladeAlignment * CurrentWeaponTransform.GetRotation()).GetNormalized();
+
+    // Place the actual authored BladeBase local point exactly at CandidateBase.
+    const FVector CandidateWeaponTranslation =
+        CandidateBase -
+        CandidateWeaponRotation.RotateVector(
+            CurrentWeaponTransform.GetScale3D() * BladeBaseLocal);
+
+    const FTransform CandidateWeaponTransform(
+        CandidateWeaponRotation,
+        CandidateWeaponTranslation,
+        CurrentWeaponTransform.GetScale3D());
+
+    /*
+     * WeaponToHand is the authored weapon-relative attachment transform used
+     * by the equipment system. Applying it to the complete candidate weapon
+     * transform gives the real required hand/socket transform instead of
+     * pretending the blade base/pivot is the hand.
+     */
+    const FTransform RequiredHandTransform =
+        Equipment->Definition->WeaponToHand * CandidateWeaponTransform;
+
+    const FVector RequiredHandWorld =
+        RequiredHandTransform.GetLocation();
+
     FVector CandidateElbow;
     float ElbowMovementCost = 0.f;
 
     if (!FindBestElbowPosition(
             ShoulderWorld,
-            CandidateBase,
+            RequiredHandWorld,
             CurrentElbowWorld,
             CandidateElbow,
             ElbowMovementCost))
@@ -585,8 +645,11 @@ bool UIronboundParryComponent::EvaluateCandidate(
         return false;
     }
 
+    const FVector CurrentHandWorld =
+        FighterMesh->GetSocketLocation(HandBone);
+
     const float TranslationCost =
-        FVector::Distance(CurrentDefenseBase, CandidateBase);
+        FVector::Distance(CurrentHandWorld, RequiredHandWorld);
 
     const float RotationAbsDot =
         FMath::Clamp(
@@ -660,7 +723,9 @@ bool UIronboundParryComponent::EvaluateCandidate(
     OutCandidate.IncomingTip = IncomingTipWorld;
     OutCandidate.DefenseBase = CandidateBase;
     OutCandidate.DefenseTip = CandidateTip;
-    OutCandidate.RequiredHandPosition = CandidateBase;
+    OutCandidate.RequiredWeaponTransform = CandidateWeaponTransform;
+    OutCandidate.RequiredHandTransform = RequiredHandTransform;
+    OutCandidate.RequiredHandPosition = RequiredHandWorld;
     OutCandidate.RequiredElbowPosition = CandidateElbow;
     OutCandidate.IncomingTime = IncomingTime;
     OutCandidate.TimeUntilContact = TimeUntilContact;
@@ -752,6 +817,7 @@ bool UIronboundParryComponent::FindBestParryCandidate(
         return false;
     }
 
+    FTransform CurrentWeaponTransform = FTransform::Identity;
     FVector CurrentDefenseBase;
     FVector CurrentDefenseTip;
     float BladeLength = 0.f;
@@ -759,6 +825,7 @@ bool UIronboundParryComponent::FindBestParryCandidate(
     float MaxBladeFraction = 0.f;
 
     if (!GetCurrentWeaponGeometry(
+            CurrentWeaponTransform,
             CurrentDefenseBase,
             CurrentDefenseTip,
             BladeLength,
@@ -960,6 +1027,7 @@ bool UIronboundParryComponent::FindBestParryCandidate(
                                 DefenseDirection,
                                 DefenderBladeFraction,
                                 BladeLength,
+                                CurrentWeaponTransform,
                                 CurrentDefenseBase,
                                 CurrentDefenseDirection,
                                 Candidate))

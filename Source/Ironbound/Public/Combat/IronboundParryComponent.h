@@ -38,6 +38,16 @@ struct FIronboundParryCandidate
     FVector IncomingTip = FVector::ZeroVector;
     FVector DefenseBase = FVector::ZeroVector;
     FVector DefenseTip = FVector::ZeroVector;
+
+    // Complete desired weapon pose. Blade direction alone leaves weapon roll
+    // underdetermined, so the solver preserves the current weapon roll as the
+    // minimum-rotation solution that aligns the current blade axis to the
+    // candidate blade axis.
+    FTransform RequiredWeaponTransform = FTransform::Identity;
+
+    // Actual hand/socket transform implied by RequiredWeaponTransform and the
+    // weapon definition's WeaponToHand attachment transform.
+    FTransform RequiredHandTransform = FTransform::Identity;
     FVector RequiredHandPosition = FVector::ZeroVector;
     FVector RequiredElbowPosition = FVector::ZeroVector;
 
@@ -188,6 +198,7 @@ private:
     void DrawParrySolutionDebug() const;
 
     bool GetCurrentWeaponGeometry(
+        FTransform& OutCurrentWeaponTransform,
         FVector& OutCurrentBaseWorld,
         FVector& OutCurrentTipWorld,
         float& OutBladeLength,
@@ -214,6 +225,7 @@ private:
         const FVector& DefenseDirection,
         float DefenderBladeFraction,
         float BladeLength,
+        const FTransform& CurrentWeaponTransform,
         const FVector& CurrentDefenseBase,
         const FVector& CurrentDefenseDirection,
         FIronboundParryCandidate& OutCandidate) const;
