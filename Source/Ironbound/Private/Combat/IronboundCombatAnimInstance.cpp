@@ -1,6 +1,7 @@
 #include "Combat/IronboundCombatAnimInstance.h"
 #include "Combat/IronboundCombatFocusComponent.h"
 #include "Combat/IronboundCombatExecutionComponent.h"
+#include "Combat/IronboundParryComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 
 void UIronboundCombatAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
@@ -23,6 +24,26 @@ void UIronboundCombatAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		Owner
 			? Owner->FindComponentByClass<UIronboundCombatExecutionComponent>()
 			: nullptr;
+
+	const auto* Parry =
+		Owner
+			? Owner->FindComponentByClass<UIronboundParryComponent>()
+			: nullptr;
+
+	// Snapshot cached procedural-parry state for the AnimGraph.
+	// The AnimInstance does not run the solver.
+	ParryIKActive =
+		Parry && Parry->HasActiveParryPose();
+
+	ParryHandTarget =
+		ParryIKActive
+			? Parry->GetActiveParryHandTransform()
+			: FTransform::Identity;
+
+	ParryElbowTarget =
+		ParryIKActive
+			? Parry->GetActiveParryElbowPosition()
+			: FVector::ZeroVector;
 
 	if (Target)
 	{

@@ -76,6 +76,25 @@ class IRONBOUND_API UIronboundParryComponent : public UActorComponent
 public:
     UIronboundParryComponent();
 
+    UFUNCTION(BlueprintPure, Category="Combat|Parry")
+    bool HasActiveParryPose() const { return bHasActiveParryCandidate; }
+
+    UFUNCTION(BlueprintPure, Category="Combat|Parry")
+    FTransform GetActiveParryHandTransform() const
+    {
+        return bHasActiveParryCandidate
+            ? ActiveParryCandidate.RequiredHandTransform
+            : FTransform::Identity;
+    }
+
+    UFUNCTION(BlueprintPure, Category="Combat|Parry")
+    FVector GetActiveParryElbowPosition() const
+    {
+        return bHasActiveParryCandidate
+            ? ActiveParryCandidate.RequiredElbowPosition
+            : FVector::ZeroVector;
+    }
+
 protected:
     virtual void BeginPlay() override;
     virtual void TickComponent(
@@ -131,9 +150,6 @@ protected:
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0"))
     float RotationCostWeight = 0.35f;
 
-    // Timing limits. Incoming trajectory TimeSeconds is source-animation time.
-    // Runtime timing is read from the attacker's active montage and converted
-    // from montage-track time back into source-animation segment time.
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
     float ReactionDelaySeconds = 0.15f;
 
@@ -146,13 +162,6 @@ protected:
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.001"))
     float MinimumTimeToContact = 0.03f;
 
-    /*
-     * Ranking only: candidates above the hard speed limits are still rejected
-     * exactly as before. Among the survivors, prefer parries that consume less
-     * of the defender's available hand/blade speed budget. Squaring the
-     * utilization makes near-limit, last-moment parries increasingly costly
-     * without introducing another arbitrary pass/fail timestamp.
-     */
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
     float TimingPressureCostWeight = 100.f;
 
@@ -168,12 +177,6 @@ private:
 
     TWeakObjectPtr<AActor> ObservedAttacker;
     bool bObservedCommittedAttack = false;
-
-    // Recognition/reaction state:
-    // observing Commit is not enough. The defender first waits until the
-    // attacker's source playback reaches the trajectory's automatically
-    // derived ActiveStartTime (recognizable blade motion), then waits the
-    // real ReactionDelaySeconds before solving the remaining trajectory.
     bool bAttackRecognized = false;
     bool bReactionReady = false;
     float RecognitionWorldTime = 0.f;
@@ -186,6 +189,11 @@ private:
     float ArmLength = 0.f;
 
     mutable FIronboundParryDiagnostics LastDiagnostics;
+
+    // Cached solver result consumed by animation. This state is independent
+    // from debug visualization.
+    FIronboundParryCandidate ActiveParryCandidate;
+    bool bHasActiveParryCandidate = false;
 
     bool CalculateArmDimensions();
     void UpdateAttackTimingState();

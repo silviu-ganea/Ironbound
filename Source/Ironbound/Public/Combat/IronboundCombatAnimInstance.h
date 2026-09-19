@@ -28,5 +28,17 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category="Combat|Alignment")
 	float CombatFacingDelta = 0.f;
 
+	/** True while the parry solver exposes a valid pose for right-arm IK. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category="Combat|Parry")
+	bool ParryIKActive = false;
+
+	/** World-space hand/socket target produced by the parry solver. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category="Combat|Parry")
+	FTransform ParryHandTarget = FTransform::Identity;
+
+	/** World-space elbow joint target produced by the parry solver. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category="Combat|Parry")
+	FVector ParryElbowTarget = FVector::ZeroVector;
+
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
 };
