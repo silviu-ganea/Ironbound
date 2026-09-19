@@ -144,6 +144,25 @@ public:
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
 	float GetCombatFacingDelta() const;
 
+	/** True while this fighter has a committed blade trajectory available. */
+	UFUNCTION(BlueprintPure, Category="Combat|Attack")
+	bool HasCommittedBladePath() const
+	{
+		return Phase == EIronboundAttackPhase::Committed
+			&& CommittedTrajectory.bValid;
+	}
+
+	/** Committed blade trajectory in attacker root-local space. */
+	const FBladeTrajectory& GetCommittedTrajectory() const
+	{
+		return CommittedTrajectory;
+	}
+
+	/** Attacker root transform captured when the attack was committed. */
+	const FTransform& GetCommittedTransform() const
+	{
+		return CommittedTransform;
+	}
 
 	virtual void TickComponent(
 		float DeltaTime,
