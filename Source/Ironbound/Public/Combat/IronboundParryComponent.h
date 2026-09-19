@@ -27,7 +27,8 @@ struct FIronboundParryDiagnostics
     int32 BroadReachRejected = 0;
     int32 GeneratedCandidates = 0;
     int32 AngleRejected = 0;
-    int32 ElbowRejected = 0;
+    int32 AnatomyRejected = 0;
+    int32 BodyRejected = 0;
     int32 TimingRejected = 0;
     int32 SpeedRejected = 0;
     int32 ValidCandidates = 0;
@@ -35,6 +36,7 @@ struct FIronboundParryDiagnostics
     float BestTimeUntilContact = -1.f;
     float BestRequiredHandSpeed = -1.f;
     float BestRequiredBladeAngularSpeed = -1.f;
+    float BestQuality = -1.f;
 };
 
 USTRUCT()
@@ -48,14 +50,7 @@ struct FIronboundParryCandidate
     FVector DefenseBase = FVector::ZeroVector;
     FVector DefenseTip = FVector::ZeroVector;
 
-    // Complete desired weapon pose. Blade direction alone leaves weapon roll
-    // underdetermined, so the solver preserves the current weapon roll as the
-    // minimum-rotation solution that aligns the current blade axis to the
-    // candidate blade axis.
     FTransform RequiredWeaponTransform = FTransform::Identity;
-
-    // Actual hand/socket transform implied by RequiredWeaponTransform and the
-    // weapon definition's WeaponToHand attachment transform.
     FTransform RequiredHandTransform = FTransform::Identity;
     FVector RequiredHandPosition = FVector::ZeroVector;
     FVector RequiredElbowPosition = FVector::ZeroVector;
@@ -63,16 +58,12 @@ struct FIronboundParryCandidate
     float IncomingTime = 0.f;
     float TimeUntilContact = 0.f;
     float DefenderBladeFraction = 0.f;
+    float IncomingBladeFraction = 0.f;
     float IntersectionAngleDegrees = 0.f;
+    float ElbowAngleDegrees = 0.f;
     float RequiredHandSpeed = 0.f;
     float RequiredBladeAngularSpeed = 0.f;
-
-    // Pure pose displacement cost, retained for diagnostics.
-    float MovementCost = TNumericLimits<float>::Max();
-
-    // Final solver ranking. This includes pose displacement plus how much of
-    // the defender's available movement budget the parry consumes.
-    float SelectionCost = TNumericLimits<float>::Max();
+    float Quality = -TNumericLimits<float>::Max();
 
     bool bValid = false;
 };
@@ -91,20 +82,18 @@ public:
     UFUNCTION(BlueprintPure, Category="Combat|Parry")
     bool HasActiveParryPose() const { return bHasActiveParryCandidate; }
 
+    // These are the EXECUTED targets, not the final locked targets.  The
+    // Control Rig therefore follows a stable motion plan instead of snapping.
     UFUNCTION(BlueprintPure, Category="Combat|Parry")
     FTransform GetActiveParryHandTransform() const
     {
-        return bHasActiveParryCandidate
-            ? ActiveParryCandidate.RequiredHandTransform
-            : FTransform::Identity;
+        return bHasActiveParryCandidate ? ExecutedHandTransform : FTransform::Identity;
     }
 
     UFUNCTION(BlueprintPure, Category="Combat|Parry")
     FVector GetActiveParryElbowPosition() const
     {
-        return bHasActiveParryCandidate
-            ? ActiveParryCandidate.RequiredElbowPosition
-            : FVector::ZeroVector;
+        return bHasActiveParryCandidate ? ExecutedElbowPosition : FVector::ZeroVector;
     }
 
 protected:
@@ -127,72 +116,102 @@ protected:
     FName PelvisBone = TEXT("pelvis");
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="0.0"))
-    float ArmReachMargin = 1.0f;
+    float ArmReachMargin = 1.f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="4", ClampMax="64"))
-    int32 ElbowCircleSamples = 16;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="8", ClampMax="64"))
+    int32 ElbowCircleSamples = 24;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="0.0"))
-    float ElbowMovementCostWeight = 0.35f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="-1.0", ClampMax="1.0"))
+    float MinimumElbowSideDot = -0.15f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="0.0", ClampMax="1.0"))
-    float MinimumElbowSideDot = 0.0f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="0.0", ClampMax="180.0"))
+    float MinimumElbowAngleDegrees = 55.f;
 
-    // Defensive-pose constraints. These deliberately prevent the solver from
-    // choosing tiny wrist-only corrections as the cheapest parry.
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
-    float MinimumHandDisplacement = 30.0f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="0.0", ClampMax="180.0"))
+    float MaximumElbowAngleDegrees = 145.f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
-    float PreferredHandDisplacement = 38.0f;
+    // Hard body-space constraints.  These replace the old "move the hand at
+    // least N cm" shell, which was selecting spectacular but bad poses.
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Pose")
+    float MinimumHandHeightAbovePelvis = 12.f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
-    float MinimumHandHeightAbovePelvis = 8.0f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Pose")
+    float MaximumHandHeightAboveShoulder = 45.f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0", ClampMax="180.0"))
-    float MinimumElbowAngleDegrees = 40.0f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Pose", meta=(ClampMin="0.0"))
+    float MinimumHandForwardFromTorso = 4.f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0", ClampMax="180.0"))
-    float MaximumElbowAngleDegrees = 155.0f;
-
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
-    float DefensivePoseCostWeight = 1.25f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Pose", meta=(ClampMin="0.0"))
+    float MaximumHandLateralFromShoulder = 58.f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Weapon", meta=(ClampMin="0.0", ClampMax="1.0"))
-    float MinParryBladeFraction = 0.20f;
+    float MinParryBladeFraction = 0.30f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Weapon", meta=(ClampMin="0.0", ClampMax="1.0"))
-    float MaxParryBladeFraction = 0.90f;
-
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="2", ClampMax="32"))
-    int32 IncomingBladeContactSamples = 5;
+    float MaxParryBladeFraction = 0.78f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="2", ClampMax="16"))
-    int32 DefenderBladeFractionSamples = 4;
+    int32 IncomingBladeContactSamples = 7;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="4", ClampMax="64"))
-    int32 DefenseOrientationSamples = 12;
+    // Only intercept the dangerous outer portion of the attacking blade.
+    // 0 = attacker blade base / hilt, 1 = tip.
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float MinimumIncomingBladeFraction = 0.65f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="2", ClampMax="16"))
-    int32 DefenseCrossingAngleSamples = 5;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float MaximumIncomingBladeFraction = 0.95f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0", ClampMax="1.0"))
+    float PreferredIncomingBladeFraction = 0.82f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="2", ClampMax="12"))
+    int32 DefenderBladeFractionSamples = 5;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="8", ClampMax="64"))
+    int32 DefenseOrientationSamples = 24;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="2", ClampMax="12"))
+    int32 DefenseCrossingAngleSamples = 6;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0", ClampMax="90.0"))
-    float MinimumIntersectionAngleDegrees = 30.f;
+    float MinimumIntersectionAngleDegrees = 70.f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0"))
-    float TranslationCostWeight = 1.f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0", ClampMax="90.0"))
+    float PreferredIntersectionAngleDegrees = 90.f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0"))
-    float RotationCostWeight = 0.35f;
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0", ClampMax="180.0"))
+    float PreferredElbowAngleDegrees = 100.f;
 
-    // Delay from observing a committed attack to perceiving it. At zero, the
-    // defender can forecast from the committed trajectory immediately instead
-    // of waiting for the blade to reach ActiveStartTime.
+    // Quality weights.  Higher quality wins; displacement is only a small
+    // comfort term now, never the primary objective.
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
+    float CrossingQualityWeight = 5.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
+    float ElbowQualityWeight = 2.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
+    float BladeCenterQualityWeight = 1.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
+    float TimingMarginQualityWeight = 0.5f;
+
+    // For now we explicitly prefer readable, visible defensive movement.
+    // We are NOT rewarding cheap/minimal hand motion.
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
+    float DramaticPoseQualityWeight = 3.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="1.0"))
+    float PreferredVisibleHandTravel = 38.f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
+    float IncomingTipContactQualityWeight = 3.0f;
+
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
-    float PerceptionDelaySeconds = 0.0f;
+    float PerceptionDelaySeconds = 0.f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
-    float ReactionDelaySeconds = 0.0f;
+    float ReactionDelaySeconds = 0.f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="1.0"))
     float MaxParryHandSpeed = 500.f;
@@ -203,8 +222,18 @@ protected:
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.001"))
     float MinimumTimeToContact = 0.03f;
 
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
-    float TimingPressureCostWeight = 100.f;
+    // Real execution speed, deliberately separate from feasibility limits.
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Execution", meta=(ClampMin="1.0"))
+    float ParryMovementSpeed = 240.f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Execution", meta=(ClampMin="1.0"))
+    float ParryRotationSpeedDegrees = 900.f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Execution", meta=(ClampMin="0.0"))
+    float LeadHoldSeconds = 0.06f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Execution", meta=(ClampMin="0.1"))
+    float PositionArrivalTolerance = 2.f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Debug")
     bool bDrawParryDebug = true;
@@ -217,6 +246,7 @@ private:
     TObjectPtr<UIronboundCombatFocusComponent> CombatFocus;
 
     TWeakObjectPtr<AActor> ObservedAttacker;
+
     bool bObservedCommittedAttack = false;
     bool bAttackRecognized = false;
     bool bReactionReady = false;
@@ -232,20 +262,24 @@ private:
 
     mutable FIronboundParryDiagnostics LastDiagnostics;
 
-    // Cached solver result consumed by animation. This state is independent
-    // from debug visualization.
     FIronboundParryCandidate ActiveParryCandidate;
     bool bHasActiveParryCandidate = false;
     EIronboundParryState ParryState = EIronboundParryState::Observing;
 
+    FTransform ExecutedHandTransform = FTransform::Identity;
+    FVector ExecutedElbowPosition = FVector::ZeroVector;
+
     void ResetParryAction();
+    void InitializeExecutionPose();
+    void UpdateExecutionPose(float DeltaTime);
+
     bool CalculateArmDimensions();
     void UpdateAttackTimingState();
     bool GetIncomingSourcePlaybackTime(float& OutSourceTime) const;
     float GetTimeUntilIncomingSample(float IncomingTime) const;
+
     void DrawDiagnosticsDebug() const;
     void LogDiagnosticsOnce() const;
-
     void DrawAnatomyDebug() const;
     void DrawParrySolutionDebug() const;
 
@@ -262,7 +296,13 @@ private:
         const FVector& RequiredHandWorld,
         const FVector& CurrentElbowWorld,
         FVector& OutElbowWorld,
-        float& OutElbowMovementCost) const;
+        float& OutElbowMovementCost,
+        float& OutElbowAngleDegrees) const;
+
+    bool IsDefensivePoseAnatomicallyUseful(
+        const FVector& ShoulderWorld,
+        const FVector& RequiredHandWorld,
+        const FVector& CandidateElbow) const;
 
     bool FindBestParryCandidate(FIronboundParryCandidate& OutCandidate) const;
 
@@ -274,6 +314,7 @@ private:
         const FVector& IncomingContactWorld,
         const FVector& IncomingDirection,
         float IncomingTime,
+        float IncomingBladeFraction,
         const FVector& DefenseDirection,
         float DefenderBladeFraction,
         float BladeLength,

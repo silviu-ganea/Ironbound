@@ -36,7 +36,8 @@ void UIronboundParryComponent::BeginPlay()
 
     if (CalculateArmDimensions())
     {
-        UE_LOG(LogTemp, Warning, TEXT("Parry Anatomy [%s]: UpperArm=%.1f cm Forearm=%.1f cm TotalArm=%.1f cm"),
+        UE_LOG(LogTemp, Warning,
+            TEXT("Parry Anatomy [%s]: UpperArm=%.1f Forearm=%.1f Total=%.1f cm"),
             *GetNameSafe(GetOwner()), UpperArmLength, ForearmLength, ArmLength);
     }
 }
@@ -50,29 +51,26 @@ bool UIronboundParryComponent::CalculateArmDimensions()
     const int32 HandIndex = FighterMesh->GetBoneIndex(HandBone);
 
     if (UpperArmIndex == INDEX_NONE || LowerArmIndex == INDEX_NONE || HandIndex == INDEX_NONE)
-    {
-        UE_LOG(LogTemp, Warning, TEXT("Parry: %s is missing one or more arm bones"), *GetNameSafe(GetOwner()));
         return false;
-    }
 
     const FReferenceSkeleton& RefSkeleton = FighterMesh->GetSkeletalMeshAsset()->GetRefSkeleton();
     const TArray<FTransform>& RefPose = RefSkeleton.GetRefBonePose();
 
-    auto GetRefPoseComponentTransform = [&RefSkeleton, &RefPose](int32 BoneIndex)
+    auto GetCS = [&RefSkeleton, &RefPose](int32 BoneIndex)
     {
-        FTransform ComponentTransform = RefPose[BoneIndex];
-        int32 ParentIndex = RefSkeleton.GetParentIndex(BoneIndex);
-        while (ParentIndex != INDEX_NONE)
+        FTransform Result = RefPose[BoneIndex];
+        for (int32 Parent = RefSkeleton.GetParentIndex(BoneIndex);
+             Parent != INDEX_NONE;
+             Parent = RefSkeleton.GetParentIndex(Parent))
         {
-            ComponentTransform *= RefPose[ParentIndex];
-            ParentIndex = RefSkeleton.GetParentIndex(ParentIndex);
+            Result *= RefPose[Parent];
         }
-        return ComponentTransform;
+        return Result;
     };
 
-    const FVector Shoulder = GetRefPoseComponentTransform(UpperArmIndex).GetTranslation();
-    const FVector Elbow = GetRefPoseComponentTransform(LowerArmIndex).GetTranslation();
-    const FVector Hand = GetRefPoseComponentTransform(HandIndex).GetTranslation();
+    const FVector Shoulder = GetCS(UpperArmIndex).GetTranslation();
+    const FVector Elbow = GetCS(LowerArmIndex).GetTranslation();
+    const FVector Hand = GetCS(HandIndex).GetTranslation();
 
     UpperArmLength = FVector::Distance(Shoulder, Elbow);
     ForearmLength = FVector::Distance(Elbow, Hand);
@@ -80,14 +78,13 @@ bool UIronboundParryComponent::CalculateArmDimensions()
     return true;
 }
 
-void UIronboundParryComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
+void UIronboundParryComponent::TickComponent(
+    float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
     Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
     UpdateAttackTimingState();
 
-    // Before commitment we are allowed to search for a solution. The instant
-    // one is accepted, it is locked and the solver stops running for this attack.
     if (!bHasActiveParryCandidate && bObservedCommittedAttack)
     {
         ParryState = bReactionReady
@@ -96,34 +93,90 @@ void UIronboundParryComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 
         if (bReactionReady)
         {
-            FIronboundParryCandidate BestCandidate;
-            if (FindBestParryCandidate(BestCandidate))
+            FIronboundParryCandidate Best;
+            if (FindBestParryCandidate(Best))
             {
-                ActiveParryCandidate = BestCandidate;
+                ActiveParryCandidate = Best;
                 bHasActiveParryCandidate = true;
+                InitializeExecutionPose();
                 ParryState = EIronboundParryState::Moving;
 
                 UE_LOG(LogTemp, Warning,
-                    TEXT("Parry [%s]: LOCKED candidate | t=%.3fs hand=%.0f cm/s blade=%.0f deg/s"),
-                    *GetNameSafe(GetOwner()),
-                    ActiveParryCandidate.TimeUntilContact,
-                    ActiveParryCandidate.RequiredHandSpeed,
-                    ActiveParryCandidate.RequiredBladeAngularSpeed);
+                    TEXT("Parry [%s]: LOCKED quality=%.2f t=%.3f hand=%.0fcm/s blade=%.0fdeg/s cross=%.0f enemyBlade=%.0f%% elbow=%.0f"),
+                    *GetNameSafe(GetOwner()), Best.Quality, Best.TimeUntilContact,
+                    Best.RequiredHandSpeed, Best.RequiredBladeAngularSpeed,
+                    Best.IntersectionAngleDegrees, Best.IncomingBladeFraction * 100.f,
+                    Best.ElbowAngleDegrees);
             }
         }
     }
 
-    if (!bDrawParryDebug) return;
+    if (bHasActiveParryCandidate)
+        UpdateExecutionPose(DeltaTime);
 
-    DrawAnatomyDebug();
-    DrawParrySolutionDebug();
-    DrawDiagnosticsDebug();
+    if (bDrawParryDebug)
+    {
+        DrawAnatomyDebug();
+        DrawParrySolutionDebug();
+        DrawDiagnosticsDebug();
+    }
+}
+
+void UIronboundParryComponent::InitializeExecutionPose()
+{
+    if (!FighterMesh) return;
+
+    ExecutedHandTransform = FighterMesh->GetSocketTransform(HandBone, RTS_World);
+    ExecutedElbowPosition = FighterMesh->GetSocketLocation(LowerArmBone);
+}
+
+void UIronboundParryComponent::UpdateExecutionPose(float DeltaTime)
+{
+    if (!bHasActiveParryCandidate) return;
+
+    const FVector CurrentLocation = ExecutedHandTransform.GetLocation();
+    const FVector TargetLocation = ActiveParryCandidate.RequiredHandTransform.GetLocation();
+    const FVector NewLocation = FMath::VInterpConstantTo(
+        CurrentLocation, TargetLocation, DeltaTime, ParryMovementSpeed);
+
+    const FQuat CurrentRotation = ExecutedHandTransform.GetRotation();
+    const FQuat TargetRotation = ActiveParryCandidate.RequiredHandTransform.GetRotation();
+    const float AngleRadians = CurrentRotation.AngularDistance(TargetRotation);
+    FQuat NewRotation = TargetRotation;
+
+    if (AngleRadians > KINDA_SMALL_NUMBER)
+    {
+        const float MaxStepRadians = FMath::DegreesToRadians(ParryRotationSpeedDegrees) * DeltaTime;
+        const float Alpha = FMath::Clamp(MaxStepRadians / AngleRadians, 0.f, 1.f);
+        NewRotation = FQuat::Slerp(CurrentRotation, TargetRotation, Alpha).GetNormalized();
+    }
+
+    ExecutedHandTransform.SetLocation(NewLocation);
+    ExecutedHandTransform.SetRotation(NewRotation);
+    ExecutedHandTransform.SetScale3D(FVector::OneVector);
+
+    ExecutedElbowPosition = FMath::VInterpConstantTo(
+        ExecutedElbowPosition,
+        ActiveParryCandidate.RequiredElbowPosition,
+        DeltaTime,
+        ParryMovementSpeed * 0.8f);
+
+    const float PositionError = FVector::Distance(NewLocation, TargetLocation);
+    const float RotationErrorDeg =
+        FMath::RadiansToDegrees(NewRotation.AngularDistance(TargetRotation));
+
+    if (PositionError <= PositionArrivalTolerance && RotationErrorDeg <= 3.f)
+        ParryState = EIronboundParryState::Holding;
+    else
+        ParryState = EIronboundParryState::Moving;
 }
 
 void UIronboundParryComponent::ResetParryAction()
 {
     ActiveParryCandidate = FIronboundParryCandidate();
     bHasActiveParryCandidate = false;
+    ExecutedHandTransform = FTransform::Identity;
+    ExecutedElbowPosition = FVector::ZeroVector;
     ParryState = EIronboundParryState::Observing;
 }
 
@@ -159,47 +212,30 @@ void UIronboundParryComponent::UpdateAttackTimingState()
         RecognitionWorldTime = 0.f;
         bDiagnosticsLoggedForObservedAttack = false;
         LastParryEarlyExitReason.Reset();
-        UE_LOG(LogTemp, Warning, TEXT("ParryDiag [%s]: observed committed attack from %s | perception delay %.3fs"),
-            *GetNameSafe(GetOwner()), *GetNameSafe(Target), PerceptionDelaySeconds);
         return;
     }
 
     if (!bAttackRecognized)
     {
         if (!GetWorld()) return;
-        const float ElapsedSinceObservation = GetWorld()->GetTimeSeconds() - ObservationWorldTime;
-        if (ElapsedSinceObservation + KINDA_SMALL_NUMBER < PerceptionDelaySeconds) return;
+        const float Elapsed = GetWorld()->GetTimeSeconds() - ObservationWorldTime;
+        if (Elapsed + KINDA_SMALL_NUMBER < PerceptionDelaySeconds) return;
 
-        const FBladeTrajectory& IncomingTrajectory = TargetExecution->GetCommittedTrajectory();
-        if (!IncomingTrajectory.bValid) return;
-
-        float CurrentSourceTime = 0.f;
-        const bool bHasSourceTime = GetIncomingSourcePlaybackTime(CurrentSourceTime);
+        if (!TargetExecution->GetCommittedTrajectory().bValid) return;
 
         bAttackRecognized = true;
         ParryState = EIronboundParryState::Reacting;
         RecognitionWorldTime = GetWorld()->GetTimeSeconds();
-        UE_LOG(LogTemp, Warning,
-            TEXT("ParryDiag [%s]: attack perceived %.3fs after commit | attacker source=%s | active start %.3fs | reaction delay %.3fs"),
-            *GetNameSafe(GetOwner()), ElapsedSinceObservation,
-            bHasSourceTime ? *FString::Printf(TEXT("%.3fs"), CurrentSourceTime) : TEXT("unavailable"),
-            IncomingTrajectory.ActiveStartTime, ReactionDelaySeconds);
         return;
     }
 
     if (!bReactionReady && GetWorld())
     {
-        const float ElapsedSinceRecognition = GetWorld()->GetTimeSeconds() - RecognitionWorldTime;
-        if (ElapsedSinceRecognition >= ReactionDelaySeconds)
+        const float Elapsed = GetWorld()->GetTimeSeconds() - RecognitionWorldTime;
+        if (Elapsed >= ReactionDelaySeconds)
         {
             bReactionReady = true;
             ParryState = EIronboundParryState::Moving;
-            float SourceTime = 0.f;
-            const bool bHasSourceTime = GetIncomingSourcePlaybackTime(SourceTime);
-            UE_LOG(LogTemp, Warning,
-                TEXT("ParryDiag [%s]: reaction ready %.3fs after recognition | attacker source time %s"),
-                *GetNameSafe(GetOwner()), ElapsedSinceRecognition,
-                bHasSourceTime ? *FString::Printf(TEXT("%.3fs"), SourceTime) : TEXT("unavailable"));
         }
     }
 }
@@ -207,26 +243,27 @@ void UIronboundParryComponent::UpdateAttackTimingState()
 bool UIronboundParryComponent::GetIncomingSourcePlaybackTime(float& OutSourceTime) const
 {
     OutSourceTime = 0.f;
-    if (!bObservedCommittedAttack) return false;
-
     AActor* Attacker = ObservedAttacker.Get();
     if (!Attacker) return false;
 
-    UIronboundEquipmentComponent* AttackerEquipment = Attacker->FindComponentByClass<UIronboundEquipmentComponent>();
-    USkeletalMeshComponent* AttackerMesh = AttackerEquipment ? AttackerEquipment->GetFighterMesh() : nullptr;
-    UAnimInstance* AnimInstance = AttackerMesh ? AttackerMesh->GetAnimInstance() : nullptr;
-    UAnimMontage* ActiveMontage = AnimInstance ? AnimInstance->GetCurrentActiveMontage() : nullptr;
-    if (!AnimInstance || !ActiveMontage) return false;
+    UIronboundEquipmentComponent* Equipment =
+        Attacker->FindComponentByClass<UIronboundEquipmentComponent>();
+    USkeletalMeshComponent* Mesh = Equipment ? Equipment->GetFighterMesh() : nullptr;
+    UAnimInstance* Anim = Mesh ? Mesh->GetAnimInstance() : nullptr;
+    UAnimMontage* Montage = Anim ? Anim->GetCurrentActiveMontage() : nullptr;
+    if (!Anim || !Montage) return false;
 
-    const float MontagePosition = AnimInstance->Montage_GetPosition(ActiveMontage);
-    for (const FSlotAnimationTrack& SlotTrack : ActiveMontage->SlotAnimTracks)
+    const float MontagePosition = Anim->Montage_GetPosition(Montage);
+
+    for (const FSlotAnimationTrack& SlotTrack : Montage->SlotAnimTracks)
     {
         for (const FAnimSegment& Segment : SlotTrack.AnimTrack.AnimSegments)
         {
-            const float SegmentStart = Segment.StartPos;
-            const float SegmentEnd = SegmentStart + Segment.GetLength();
-            if (MontagePosition + KINDA_SMALL_NUMBER < SegmentStart ||
-                MontagePosition - KINDA_SMALL_NUMBER > SegmentEnd) continue;
+            const float Start = Segment.StartPos;
+            const float End = Start + Segment.GetLength();
+            if (MontagePosition + KINDA_SMALL_NUMBER < Start ||
+                MontagePosition - KINDA_SMALL_NUMBER > End)
+                continue;
 
             OutSourceTime = Segment.ConvertTrackPosToAnimPos(MontagePosition);
             return true;
@@ -238,226 +275,212 @@ bool UIronboundParryComponent::GetIncomingSourcePlaybackTime(float& OutSourceTim
 float UIronboundParryComponent::GetTimeUntilIncomingSample(float IncomingTime) const
 {
     float CurrentSourceTime = 0.f;
-    if (!GetIncomingSourcePlaybackTime(CurrentSourceTime)) return -1.f;
-    return IncomingTime - CurrentSourceTime;
-}
-
-void UIronboundParryComponent::DrawAnatomyDebug() const
-{
-    if (!FighterMesh) return;
-    if (FighterMesh->GetBoneIndex(UpperArmBone) == INDEX_NONE ||
-        FighterMesh->GetBoneIndex(LowerArmBone) == INDEX_NONE ||
-        FighterMesh->GetBoneIndex(HandBone) == INDEX_NONE) return;
-
-    const FVector Shoulder = FighterMesh->GetSocketLocation(UpperArmBone);
-    const FVector Elbow = FighterMesh->GetSocketLocation(LowerArmBone);
-    const FVector Hand = FighterMesh->GetSocketLocation(HandBone);
-
-    DrawDebugSphere(GetWorld(), Shoulder, 5.f, 12, FColor::Cyan, false, 0.f, 0, 1.5f);
-    DrawDebugSphere(GetWorld(), Elbow, 4.f, 12, FColor::Yellow, false, 0.f, 0, 1.5f);
-    DrawDebugSphere(GetWorld(), Hand, 4.f, 12, FColor::Green, false, 0.f, 0, 1.5f);
-    DrawDebugLine(GetWorld(), Shoulder, Elbow, FColor::Cyan, false, 0.f, 0, 2.f);
-    DrawDebugLine(GetWorld(), Elbow, Hand, FColor::Green, false, 0.f, 0, 2.f);
+    return GetIncomingSourcePlaybackTime(CurrentSourceTime)
+        ? IncomingTime - CurrentSourceTime
+        : -1.f;
 }
 
 bool UIronboundParryComponent::GetCurrentWeaponGeometry(
-    FTransform& OutCurrentWeaponTransform, FVector& OutCurrentBaseWorld, FVector& OutCurrentTipWorld,
-    float& OutBladeLength, float& OutMinFraction, float& OutMaxFraction) const
+    FTransform& OutTransform, FVector& OutBase, FVector& OutTip,
+    float& OutLength, float& OutMinFraction, float& OutMaxFraction) const
 {
-    OutCurrentWeaponTransform = FTransform::Identity;
-    OutCurrentBaseWorld = FVector::ZeroVector;
-    OutCurrentTipWorld = FVector::ZeroVector;
-    OutBladeLength = 0.f;
-    OutMinFraction = 0.f;
-    OutMaxFraction = 0.f;
+    const UIronboundEquipmentComponent* Equipment =
+        GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+    if (!Equipment || !Equipment->bReady || !Equipment->Definition || !Equipment->GetWeapon())
+        return false;
 
-    const UIronboundEquipmentComponent* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
-    if (!Equipment || !Equipment->bReady || !Equipment->Definition) return false;
+    OutTransform = Equipment->GetWeapon()->GetComponentTransform();
+    OutBase = OutTransform.TransformPosition(Equipment->Definition->BladeBase);
+    OutTip = OutTransform.TransformPosition(Equipment->Definition->BladeTip);
+    OutLength = FVector::Distance(Equipment->Definition->BladeBase, Equipment->Definition->BladeTip);
 
-    UStaticMeshComponent* Weapon = Equipment->GetWeapon();
-    if (!Weapon) return false;
-
-    const FVector BladeBaseLocal = Equipment->Definition->BladeBase;
-    const FVector BladeTipLocal = Equipment->Definition->BladeTip;
-    OutCurrentWeaponTransform = Weapon->GetComponentTransform();
-    OutBladeLength = FVector::Distance(BladeBaseLocal, BladeTipLocal);
-    if (OutBladeLength <= KINDA_SMALL_NUMBER) return false;
-
-    OutCurrentBaseWorld = OutCurrentWeaponTransform.TransformPosition(BladeBaseLocal);
-    OutCurrentTipWorld = OutCurrentWeaponTransform.TransformPosition(BladeTipLocal);
     OutMinFraction = FMath::Clamp(MinParryBladeFraction, 0.f, 1.f);
     OutMaxFraction = FMath::Clamp(MaxParryBladeFraction, OutMinFraction, 1.f);
-    return true;
+    return OutLength > KINDA_SMALL_NUMBER;
 }
 
 bool UIronboundParryComponent::FindBestElbowPosition(
-    const FVector& ShoulderWorld, const FVector& RequiredHandWorld, const FVector& CurrentElbowWorld,
-    FVector& OutElbowWorld, float& OutElbowMovementCost) const
+    const FVector& Shoulder, const FVector& Hand, const FVector& CurrentElbow,
+    FVector& OutElbow, float& OutMovement, float& OutElbowAngleDegrees) const
 {
-    OutElbowWorld = FVector::ZeroVector;
-    OutElbowMovementCost = TNumericLimits<float>::Max();
-    if (UpperArmLength <= KINDA_SMALL_NUMBER || ForearmLength <= KINDA_SMALL_NUMBER) return false;
+    OutMovement = TNumericLimits<float>::Max();
+    OutElbowAngleDegrees = 0.f;
 
-    const FVector ShoulderToHand = RequiredHandWorld - ShoulderWorld;
-    const float ShoulderToHandDistance = ShoulderToHand.Size();
-    if (ShoulderToHandDistance <= KINDA_SMALL_NUMBER) return false;
+    const FVector ShoulderToHand = Hand - Shoulder;
+    const float Distance = ShoulderToHand.Size();
+    const float MinReach = FMath::Abs(UpperArmLength - ForearmLength) + ArmReachMargin;
+    const float MaxReach = UpperArmLength + ForearmLength - ArmReachMargin;
 
-    const float MaximumReach = UpperArmLength + ForearmLength - ArmReachMargin;
-    const float MinimumReach = FMath::Abs(UpperArmLength - ForearmLength) + ArmReachMargin;
-    if (ShoulderToHandDistance > MaximumReach || ShoulderToHandDistance < MinimumReach) return false;
+    if (Distance <= KINDA_SMALL_NUMBER || Distance < MinReach || Distance > MaxReach)
+        return false;
 
-    const FVector Axis = ShoulderToHand / ShoulderToHandDistance;
-    const float DistanceSquared = ShoulderToHandDistance * ShoulderToHandDistance;
-    const float UpperArmSquared = UpperArmLength * UpperArmLength;
-    const float ForearmSquared = ForearmLength * ForearmLength;
-    const float AlongAxis = (UpperArmSquared - ForearmSquared + DistanceSquared) / (2.f * ShoulderToHandDistance);
+    const FVector Axis = ShoulderToHand / Distance;
+    const float Along =
+        (UpperArmLength * UpperArmLength - ForearmLength * ForearmLength + Distance * Distance) /
+        (2.f * Distance);
+    const float RadiusSq = UpperArmLength * UpperArmLength - Along * Along;
+    if (RadiusSq < -KINDA_SMALL_NUMBER) return false;
 
-    float CircleRadiusSquared = UpperArmSquared - AlongAxis * AlongAxis;
-    if (CircleRadiusSquared < -KINDA_SMALL_NUMBER) return false;
-    CircleRadiusSquared = FMath::Max(0.f, CircleRadiusSquared);
-
-    const float CircleRadius = FMath::Sqrt(CircleRadiusSquared);
-    const FVector CircleCenter = ShoulderWorld + Axis * AlongAxis;
+    const float Radius = FMath::Sqrt(FMath::Max(0.f, RadiusSq));
+    const FVector Center = Shoulder + Axis * Along;
 
     FVector BasisA = FVector::CrossProduct(Axis, FVector::UpVector);
-    if (BasisA.IsNearlyZero()) BasisA = FVector::CrossProduct(Axis, FVector::ForwardVector);
+    if (BasisA.IsNearlyZero())
+        BasisA = FVector::CrossProduct(Axis, FVector::ForwardVector);
     BasisA.Normalize();
     const FVector BasisB = FVector::CrossProduct(Axis, BasisA).GetSafeNormal();
-    if (BasisA.IsNearlyZero() || BasisB.IsNearlyZero()) return false;
 
-    const FVector CurrentShoulderToElbow = CurrentElbowWorld - ShoulderWorld;
-    FVector CurrentElbowSide = CurrentShoulderToElbow - Axis * FVector::DotProduct(CurrentShoulderToElbow, Axis);
+    FVector CurrentSide = CurrentElbow - Shoulder;
+    CurrentSide -= Axis * FVector::DotProduct(CurrentSide, Axis);
+    if (CurrentSide.IsNearlyZero())
+        CurrentSide = GetOwner()->GetActorRightVector();
+    CurrentSide.Normalize();
 
-    if (CurrentElbowSide.IsNearlyZero())
+    bool bFound = false;
+    const int32 Count = FMath::Max(8, ElbowCircleSamples);
+
+    for (int32 I = 0; I < Count; ++I)
     {
-        const FVector OwnerRight = GetOwner()->GetActorRightVector();
-        CurrentElbowSide = OwnerRight - Axis * FVector::DotProduct(OwnerRight, Axis);
-    }
-    if (CurrentElbowSide.IsNearlyZero()) return false;
-    CurrentElbowSide.Normalize();
+        const float A = 2.f * PI * float(I) / float(Count);
+        const FVector Radial =
+            (BasisA * FMath::Cos(A) + BasisB * FMath::Sin(A)).GetSafeNormal();
 
-    const int32 SampleCount = FMath::Max(4, ElbowCircleSamples);
-    bool bFoundElbow = false;
+        if (FVector::DotProduct(Radial, CurrentSide) < MinimumElbowSideDot)
+            continue;
 
-    for (int32 SampleIndex = 0; SampleIndex < SampleCount; ++SampleIndex)
-    {
-        const float Angle = 2.f * PI * static_cast<float>(SampleIndex) / static_cast<float>(SampleCount);
-        const FVector RadialDirection =
-            (BasisA * FMath::Cos(Angle) + BasisB * FMath::Sin(Angle)).GetSafeNormal();
-        if (RadialDirection.IsNearlyZero()) continue;
+        const FVector Elbow = Center + Radial * Radius;
 
-        const float ElbowSideDot = FVector::DotProduct(RadialDirection, CurrentElbowSide);
-        if (ElbowSideDot < MinimumElbowSideDot) continue;
+        const FVector ToShoulder = (Shoulder - Elbow).GetSafeNormal();
+        const FVector ToHand = (Hand - Elbow).GetSafeNormal();
+        const float Dot = FMath::Clamp(FVector::DotProduct(ToShoulder, ToHand), -1.f, 1.f);
+        const float ElbowAngle = FMath::RadiansToDegrees(FMath::Acos(Dot));
 
-        const FVector CandidateElbow = CircleCenter + RadialDirection * CircleRadius;
-        const float CandidateUpperArmLength = FVector::Distance(ShoulderWorld, CandidateElbow);
-        const float CandidateForearmLength = FVector::Distance(CandidateElbow, RequiredHandWorld);
+        if (ElbowAngle < MinimumElbowAngleDegrees || ElbowAngle > MaximumElbowAngleDegrees)
+            continue;
 
-        if (!FMath::IsNearlyEqual(CandidateUpperArmLength, UpperArmLength, 0.1f) ||
-            !FMath::IsNearlyEqual(CandidateForearmLength, ForearmLength, 0.1f)) continue;
+        // Prefer the current elbow side, but also strongly prefer a useful bend.
+        const float Movement = FVector::Distance(CurrentElbow, Elbow);
+        const float BendPenalty = FMath::Abs(ElbowAngle - PreferredElbowAngleDegrees) * 0.20f;
+        const float Cost = Movement + BendPenalty;
 
-        const float ElbowMovement = FVector::Distance(CurrentElbowWorld, CandidateElbow);
-        if (!bFoundElbow || ElbowMovement < OutElbowMovementCost)
+        if (!bFound || Cost < OutMovement)
         {
-            bFoundElbow = true;
-            OutElbowWorld = CandidateElbow;
-            OutElbowMovementCost = ElbowMovement;
+            bFound = true;
+            OutElbow = Elbow;
+            OutMovement = Cost;
+            OutElbowAngleDegrees = ElbowAngle;
         }
     }
-    return bFoundElbow;
+
+    return bFound;
+}
+
+bool UIronboundParryComponent::IsDefensivePoseAnatomicallyUseful(
+    const FVector& Shoulder, const FVector& Hand, const FVector& CandidateElbow) const
+{
+    if (!FighterMesh) return false;
+
+    const FVector OwnerLocation = GetOwner()->GetActorLocation();
+    const FVector Forward = GetOwner()->GetActorForwardVector();
+    const FVector Right = GetOwner()->GetActorRightVector();
+
+    if (FighterMesh->GetBoneIndex(PelvisBone) != INDEX_NONE)
+    {
+        const float PelvisZ = FighterMesh->GetSocketLocation(PelvisBone).Z;
+        if (Hand.Z < PelvisZ + MinimumHandHeightAbovePelvis)
+            return false;
+    }
+
+    if (Hand.Z > Shoulder.Z + MaximumHandHeightAboveShoulder)
+        return false;
+
+    const FVector LocalOffset = Hand - OwnerLocation;
+    if (FVector::DotProduct(LocalOffset, Forward) < MinimumHandForwardFromTorso)
+        return false;
+
+    const float LateralFromShoulder =
+        FMath::Abs(FVector::DotProduct(Hand - Shoulder, Right));
+    if (LateralFromShoulder > MaximumHandLateralFromShoulder)
+        return false;
+
+    // Keep the elbow out of the torso centreline.  This is intentionally a
+    // broad geometric guard, not a fake animation rule.
+    const float ElbowLateral =
+        FMath::Abs(FVector::DotProduct(CandidateElbow - OwnerLocation, Right));
+    const float ElbowForward =
+        FVector::DotProduct(CandidateElbow - OwnerLocation, Forward);
+    if (ElbowLateral < 5.f && ElbowForward < 12.f)
+        return false;
+
+    return true;
 }
 
 bool UIronboundParryComponent::EvaluateCandidate(
-    const FVector& ShoulderWorld, const FVector& CurrentElbowWorld,
-    const FVector& IncomingBaseWorld, const FVector& IncomingTipWorld,
-    const FVector& IncomingContactWorld, const FVector& IncomingDirection,
-    float IncomingTime, const FVector& DefenseDirection, float DefenderBladeFraction,
-    float BladeLength, const FTransform& CurrentWeaponTransform,
-    const FVector& CurrentDefenseBase, const FVector& CurrentDefenseDirection,
-    FIronboundParryCandidate& OutCandidate) const
+    const FVector& Shoulder, const FVector& CurrentElbow,
+    const FVector& IncomingBase, const FVector& IncomingTip,
+    const FVector& Contact, const FVector& IncomingDirection,
+    float IncomingTime, float IncomingBladeFraction,
+    const FVector& DefenseDirection,
+    float DefenderBladeFraction, float BladeLength,
+    const FTransform& CurrentWeaponTransform,
+    const FVector& CurrentDefenseBase,
+    const FVector& CurrentDefenseDirection,
+    FIronboundParryCandidate& Out) const
 {
-    if (IncomingDirection.IsNearlyZero() || DefenseDirection.IsNearlyZero()) return false;
+    const FVector DefenseDir = DefenseDirection.GetSafeNormal();
+    if (IncomingDirection.IsNearlyZero() || DefenseDir.IsNearlyZero()) return false;
 
-    const FVector NormalizedDefenseDirection = DefenseDirection.GetSafeNormal();
     const float AbsDot = FMath::Clamp(
-        FMath::Abs(FVector::DotProduct(IncomingDirection, NormalizedDefenseDirection)), 0.f, 1.f);
-    const float IntersectionAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(AbsDot));
+        FMath::Abs(FVector::DotProduct(IncomingDirection, DefenseDir)), 0.f, 1.f);
+    const float Crossing = FMath::RadiansToDegrees(FMath::Acos(AbsDot));
 
-    if (IntersectionAngleDegrees < MinimumIntersectionAngleDegrees)
+    if (Crossing < MinimumIntersectionAngleDegrees)
     {
         ++LastDiagnostics.AngleRejected;
         return false;
     }
 
-    const float ContactDistanceAlongDefenseBlade = BladeLength * DefenderBladeFraction;
-    const FVector CandidateBase = IncomingContactWorld - NormalizedDefenseDirection * ContactDistanceAlongDefenseBlade;
-    const FVector CandidateTip = CandidateBase + NormalizedDefenseDirection * BladeLength;
+    const FVector CandidateBase =
+        Contact - DefenseDir * (BladeLength * DefenderBladeFraction);
+    const FVector CandidateTip = CandidateBase + DefenseDir * BladeLength;
 
-    const UIronboundEquipmentComponent* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+    const UIronboundEquipmentComponent* Equipment =
+        GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
     if (!Equipment || !Equipment->Definition) return false;
 
     const FVector BladeBaseLocal = Equipment->Definition->BladeBase;
-    const FVector BladeTipLocal = Equipment->Definition->BladeTip;
-    const FVector LocalBladeDirection = (BladeTipLocal - BladeBaseLocal).GetSafeNormal();
-    if (LocalBladeDirection.IsNearlyZero()) return false;
 
-    const FQuat BladeAlignment = FQuat::FindBetweenNormals(CurrentDefenseDirection, NormalizedDefenseDirection);
-    const FQuat CandidateWeaponRotation =
-        (BladeAlignment * CurrentWeaponTransform.GetRotation()).GetNormalized();
+    const FQuat Alignment =
+        FQuat::FindBetweenNormals(CurrentDefenseDirection, DefenseDir);
+    const FQuat WeaponRotation =
+        (Alignment * CurrentWeaponTransform.GetRotation()).GetNormalized();
 
-    const FVector CandidateWeaponTranslation =
+    const FVector WeaponTranslation =
         CandidateBase -
-        CandidateWeaponRotation.RotateVector(CurrentWeaponTransform.GetScale3D() * BladeBaseLocal);
+        WeaponRotation.RotateVector(CurrentWeaponTransform.GetScale3D() * BladeBaseLocal);
 
-    const FTransform CandidateWeaponTransform(
-        CandidateWeaponRotation, CandidateWeaponTranslation, CurrentWeaponTransform.GetScale3D());
+    const FTransform WeaponTransform(
+        WeaponRotation, WeaponTranslation, CurrentWeaponTransform.GetScale3D());
 
-    const FTransform RequiredHandTransform =
-        Equipment->Definition->WeaponToHand * CandidateWeaponTransform;
-    const FVector RequiredHandWorld = RequiredHandTransform.GetLocation();
+    const FTransform HandTransform =
+        Equipment->Definition->WeaponToHand * WeaponTransform;
+    const FVector Hand = HandTransform.GetLocation();
 
-    FVector CandidateElbow;
-    float ElbowMovementCost = 0.f;
-    if (!FindBestElbowPosition(ShoulderWorld, RequiredHandWorld, CurrentElbowWorld, CandidateElbow, ElbowMovementCost))
+    FVector Elbow;
+    float ElbowCost = 0.f;
+    float ElbowAngle = 0.f;
+    if (!FindBestElbowPosition(
+        Shoulder, Hand, CurrentElbow, Elbow, ElbowCost, ElbowAngle))
     {
-        ++LastDiagnostics.ElbowRejected;
+        ++LastDiagnostics.AnatomyRejected;
         return false;
     }
 
-    const FVector CurrentHandWorld = FighterMesh->GetSocketLocation(HandBone);
-    const float TranslationCost = FVector::Distance(CurrentHandWorld, RequiredHandWorld);
-
-    // Reject cheap wrist-only solutions. A committed defensive action should
-    // visibly reposition the arm, not merely rotate the weapon in place.
-    if (TranslationCost + KINDA_SMALL_NUMBER < MinimumHandDisplacement)
+    if (!IsDefensivePoseAnatomicallyUseful(Shoulder, Hand, Elbow))
     {
-        ++LastDiagnostics.ElbowRejected;
+        ++LastDiagnostics.BodyRejected;
         return false;
     }
-
-    if (FighterMesh->GetBoneIndex(PelvisBone) != INDEX_NONE)
-    {
-        const float PelvisZ = FighterMesh->GetSocketLocation(PelvisBone).Z;
-        if (RequiredHandWorld.Z < PelvisZ + MinimumHandHeightAbovePelvis)
-        {
-            ++LastDiagnostics.ElbowRejected;
-            return false;
-        }
-    }
-
-    const FVector UpperArmFromElbow = (ShoulderWorld - CandidateElbow).GetSafeNormal();
-    const FVector ForearmFromElbow = (RequiredHandWorld - CandidateElbow).GetSafeNormal();
-    const float ElbowDot = FMath::Clamp(FVector::DotProduct(UpperArmFromElbow, ForearmFromElbow), -1.f, 1.f);
-    const float ElbowAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(ElbowDot));
-    if (ElbowAngleDegrees < MinimumElbowAngleDegrees || ElbowAngleDegrees > MaximumElbowAngleDegrees)
-    {
-        ++LastDiagnostics.ElbowRejected;
-        return false;
-    }
-
-    const float RotationAbsDot = FMath::Clamp(
-        FMath::Abs(FVector::DotProduct(CurrentDefenseDirection, NormalizedDefenseDirection)), 0.f, 1.f);
-    const float RotationDegrees = FMath::RadiansToDegrees(FMath::Acos(RotationAbsDot));
 
     const float TimeUntilContact = GetTimeUntilIncomingSample(IncomingTime);
     if (TimeUntilContact < MinimumTimeToContact)
@@ -466,179 +489,239 @@ bool UIronboundParryComponent::EvaluateCandidate(
         return false;
     }
 
-    const float RequiredHandSpeed = TranslationCost / TimeUntilContact;
-    const float RequiredBladeAngularSpeed = RotationDegrees / TimeUntilContact;
+    const FVector CurrentHand = FighterMesh->GetSocketLocation(HandBone);
+    const float HandDistance = FVector::Distance(CurrentHand, Hand);
 
-    if (RequiredHandSpeed > MaxParryHandSpeed || RequiredBladeAngularSpeed > MaxParryBladeAngularSpeed)
+    const float RotationDot = FMath::Clamp(
+        FMath::Abs(FVector::DotProduct(CurrentDefenseDirection, DefenseDir)), 0.f, 1.f);
+    const float RotationDegrees =
+        FMath::RadiansToDegrees(FMath::Acos(RotationDot));
+
+    const float HandSpeed = HandDistance / TimeUntilContact;
+    const float BladeSpeed = RotationDegrees / TimeUntilContact;
+
+    if (HandSpeed > MaxParryHandSpeed || BladeSpeed > MaxParryBladeAngularSpeed)
     {
         ++LastDiagnostics.SpeedRejected;
         return false;
     }
 
-    const float MovementCost =
-        TranslationCost * TranslationCostWeight +
-        RotationDegrees * RotationCostWeight +
-        ElbowMovementCost * ElbowMovementCostWeight;
+    // QUALITY: make the defense visually obvious and mechanically strong.
+    // We deliberately do NOT reward cheap/minimal movement here.
+    const float CrossingQuality =
+        1.f - FMath::Clamp(
+            FMath::Abs(Crossing - PreferredIntersectionAngleDegrees) /
+            FMath::Max(90.f - MinimumIntersectionAngleDegrees, 1.f), 0.f, 1.f);
 
-    const float HandSpeedUtilization =
-        MaxParryHandSpeed > KINDA_SMALL_NUMBER ? RequiredHandSpeed / MaxParryHandSpeed : 1.f;
-    const float BladeSpeedUtilization =
-        MaxParryBladeAngularSpeed > KINDA_SMALL_NUMBER ? RequiredBladeAngularSpeed / MaxParryBladeAngularSpeed : 1.f;
-    const float TimingPressure = FMath::Max(HandSpeedUtilization, BladeSpeedUtilization);
-    const float DefensivePosePenalty =
-        FMath::Abs(TranslationCost - PreferredHandDisplacement) * DefensivePoseCostWeight;
-    const float SelectionCost =
-        MovementCost +
-        DefensivePosePenalty +
-        TimingPressureCostWeight * FMath::Square(TimingPressure);
+    const float ElbowQuality =
+        1.f - FMath::Clamp(
+            FMath::Abs(ElbowAngle - PreferredElbowAngleDegrees) / 60.f, 0.f, 1.f);
 
-    OutCandidate.ContactPoint = IncomingContactWorld;
-    OutCandidate.IncomingBase = IncomingBaseWorld;
-    OutCandidate.IncomingTip = IncomingTipWorld;
-    OutCandidate.DefenseBase = CandidateBase;
-    OutCandidate.DefenseTip = CandidateTip;
-    OutCandidate.RequiredWeaponTransform = CandidateWeaponTransform;
-    OutCandidate.RequiredHandTransform = RequiredHandTransform;
-    OutCandidate.RequiredHandPosition = RequiredHandWorld;
-    OutCandidate.RequiredElbowPosition = CandidateElbow;
-    OutCandidate.IncomingTime = IncomingTime;
-    OutCandidate.TimeUntilContact = TimeUntilContact;
-    OutCandidate.DefenderBladeFraction = DefenderBladeFraction;
-    OutCandidate.IntersectionAngleDegrees = IntersectionAngleDegrees;
-    OutCandidate.RequiredHandSpeed = RequiredHandSpeed;
-    OutCandidate.RequiredBladeAngularSpeed = RequiredBladeAngularSpeed;
-    OutCandidate.MovementCost = MovementCost;
-    OutCandidate.SelectionCost = SelectionCost;
-    OutCandidate.bValid = true;
+    const float BladeCenter = 0.55f;
+    const float BladeCenterQuality =
+        1.f - FMath::Clamp(
+            FMath::Abs(DefenderBladeFraction - BladeCenter) / 0.45f, 0.f, 1.f);
+
+    const float HandUtilization = HandSpeed / FMath::Max(MaxParryHandSpeed, 1.f);
+    const float BladeUtilization = BladeSpeed / FMath::Max(MaxParryBladeAngularSpeed, 1.f);
+    const float TimingQuality =
+        1.f - FMath::Clamp(FMath::Max(HandUtilization, BladeUtilization), 0.f, 1.f);
+
+    // Reward a clearly visible arm action up to the preferred travel amount.
+    // Beyond that point there is no additional reward, so this cannot drive
+    // the hand arbitrarily far away.
+    const float DramaticPoseQuality =
+        FMath::Clamp(HandDistance / FMath::Max(PreferredVisibleHandTravel, 1.f), 0.f, 1.f);
+
+    // Contact should happen on the dangerous outer portion of the enemy sword,
+    // with a soft preference near PreferredIncomingBladeFraction.
+    const float IncomingRange =
+        FMath::Max(MaximumIncomingBladeFraction - MinimumIncomingBladeFraction, 0.01f);
+    const float IncomingTipContactQuality =
+        1.f - FMath::Clamp(
+            FMath::Abs(IncomingBladeFraction - PreferredIncomingBladeFraction) /
+            IncomingRange, 0.f, 1.f);
+
+    const float Quality =
+        CrossingQualityWeight * CrossingQuality +
+        ElbowQualityWeight * ElbowQuality +
+        BladeCenterQualityWeight * BladeCenterQuality +
+        TimingMarginQualityWeight * TimingQuality +
+        DramaticPoseQualityWeight * DramaticPoseQuality +
+        IncomingTipContactQualityWeight * IncomingTipContactQuality;
+
+    Out.ContactPoint = Contact;
+    Out.IncomingBase = IncomingBase;
+    Out.IncomingTip = IncomingTip;
+    Out.DefenseBase = CandidateBase;
+    Out.DefenseTip = CandidateTip;
+    Out.RequiredWeaponTransform = WeaponTransform;
+    Out.RequiredHandTransform = HandTransform;
+    Out.RequiredHandPosition = Hand;
+    Out.RequiredElbowPosition = Elbow;
+    Out.IncomingTime = IncomingTime;
+    Out.TimeUntilContact = TimeUntilContact;
+    Out.DefenderBladeFraction = DefenderBladeFraction;
+    Out.IncomingBladeFraction = IncomingBladeFraction;
+    Out.IntersectionAngleDegrees = Crossing;
+    Out.ElbowAngleDegrees = ElbowAngle;
+    Out.RequiredHandSpeed = HandSpeed;
+    Out.RequiredBladeAngularSpeed = BladeSpeed;
+    Out.Quality = Quality;
+    Out.bValid = true;
+
     ++LastDiagnostics.ValidCandidates;
     return true;
 }
 
-bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& OutCandidate) const
+bool UIronboundParryComponent::FindBestParryCandidate(
+    FIronboundParryCandidate& OutCandidate) const
 {
     OutCandidate = FIronboundParryCandidate();
     LastDiagnostics = FIronboundParryDiagnostics();
     LastParryEarlyExitReason.Reset();
 
-    if (!FighterMesh) { LastParryEarlyExitReason = TEXT("no FighterMesh"); LogDiagnosticsOnce(); return false; }
-    if (!CombatFocus) { LastParryEarlyExitReason = TEXT("no CombatFocus"); LogDiagnosticsOnce(); return false; }
-    if (!bObservedCommittedAttack) { LastParryEarlyExitReason = TEXT("no observed committed attack"); LogDiagnosticsOnce(); return false; }
-    if (!bAttackRecognized || !bReactionReady) return false;
-
-    if (UpperArmLength <= KINDA_SMALL_NUMBER || ForearmLength <= KINDA_SMALL_NUMBER)
-    { LastParryEarlyExitReason = TEXT("invalid arm dimensions"); LogDiagnosticsOnce(); return false; }
+    if (!FighterMesh || !CombatFocus || !bObservedCommittedAttack ||
+        !bAttackRecognized || !bReactionReady)
+        return false;
 
     AActor* Target = CombatFocus->GetCombatTarget();
-    if (!Target) { LastParryEarlyExitReason = TEXT("CombatFocus has no target"); LogDiagnosticsOnce(); return false; }
-    if (ObservedAttacker.Get() != Target)
-    { LastParryEarlyExitReason = TEXT("observed attacker differs from CombatFocus target"); LogDiagnosticsOnce(); return false; }
+    if (!Target || ObservedAttacker.Get() != Target) return false;
 
     UIronboundCombatExecutionComponent* TargetExecution =
         Target->FindComponentByClass<UIronboundCombatExecutionComponent>();
-    if (!TargetExecution) { LastParryEarlyExitReason = TEXT("target has no CombatExecution"); LogDiagnosticsOnce(); return false; }
-    if (!TargetExecution->HasCommittedBladePath())
-    { LastParryEarlyExitReason = TEXT("target committed blade path unavailable"); LogDiagnosticsOnce(); return false; }
+    if (!TargetExecution || !TargetExecution->HasCommittedBladePath())
+        return false;
 
-    FTransform CurrentWeaponTransform = FTransform::Identity;
+    FTransform CurrentWeaponTransform;
     FVector CurrentDefenseBase, CurrentDefenseTip;
-    float BladeLength = 0.f, MinBladeFraction = 0.f, MaxBladeFraction = 0.f;
+    float BladeLength = 0.f, MinFraction = 0.f, MaxFraction = 0.f;
 
-    if (!GetCurrentWeaponGeometry(CurrentWeaponTransform, CurrentDefenseBase, CurrentDefenseTip,
-        BladeLength, MinBladeFraction, MaxBladeFraction))
-    { LastParryEarlyExitReason = TEXT("defender weapon geometry unavailable"); LogDiagnosticsOnce(); return false; }
+    if (!GetCurrentWeaponGeometry(
+        CurrentWeaponTransform, CurrentDefenseBase, CurrentDefenseTip,
+        BladeLength, MinFraction, MaxFraction))
+        return false;
 
-    const FVector CurrentDefenseDirection = (CurrentDefenseTip - CurrentDefenseBase).GetSafeNormal();
-    if (CurrentDefenseDirection.IsNearlyZero())
-    { LastParryEarlyExitReason = TEXT("defender blade direction is zero"); LogDiagnosticsOnce(); return false; }
+    const FVector CurrentDefenseDirection =
+        (CurrentDefenseTip - CurrentDefenseBase).GetSafeNormal();
+    if (CurrentDefenseDirection.IsNearlyZero()) return false;
 
-    if (FighterMesh->GetBoneIndex(UpperArmBone) == INDEX_NONE ||
-        FighterMesh->GetBoneIndex(LowerArmBone) == INDEX_NONE)
-    { LastParryEarlyExitReason = TEXT("required arm bones unavailable"); LogDiagnosticsOnce(); return false; }
+    const FVector Shoulder = FighterMesh->GetSocketLocation(UpperArmBone);
+    const FVector CurrentElbow = FighterMesh->GetSocketLocation(LowerArmBone);
 
-    const FVector ShoulderWorld = FighterMesh->GetSocketLocation(UpperArmBone);
-    const FVector CurrentElbowWorld = FighterMesh->GetSocketLocation(LowerArmBone);
-    const FBladeTrajectory& IncomingTrajectory = TargetExecution->GetCommittedTrajectory();
-    const FTransform& AttackerCommittedTransform = TargetExecution->GetCommittedTransform();
+    const FBladeTrajectory& Trajectory = TargetExecution->GetCommittedTrajectory();
+    const FTransform& AttackerTransform = TargetExecution->GetCommittedTransform();
 
-    float CurrentIncomingSourceTime = 0.f;
-    if (!GetIncomingSourcePlaybackTime(CurrentIncomingSourceTime))
-    { LastParryEarlyExitReason = TEXT("waiting for attacker montage playback"); return false; }
-
-    if (!IncomingTrajectory.bValid || IncomingTrajectory.Segments.IsEmpty())
-    { LastParryEarlyExitReason = TEXT("incoming committed trajectory invalid or empty"); LogDiagnosticsOnce(); return false; }
+    float CurrentSourceTime = 0.f;
+    if (!GetIncomingSourcePlaybackTime(CurrentSourceTime))
+        return false;
 
     const int32 IncomingContactCount = FMath::Max(2, IncomingBladeContactSamples);
     const int32 BladeFractionCount = FMath::Max(2, DefenderBladeFractionSamples);
-    const int32 OrientationCount = FMath::Max(4, DefenseOrientationSamples);
-    const int32 CrossingAngleCount = FMath::Max(2, DefenseCrossingAngleSamples);
-    const float MinimumCrossingAngle = FMath::Clamp(MinimumIntersectionAngleDegrees, 0.f, 90.f);
-    float BestCost = TNumericLimits<float>::Max();
+    const int32 OrientationCount = FMath::Max(8, DefenseOrientationSamples);
+    const int32 CrossingCount = FMath::Max(2, DefenseCrossingAngleSamples);
 
-    for (const FBladeSegment& IncomingSegment : IncomingTrajectory.Segments)
+    float BestQuality = -TNumericLimits<float>::Max();
+
+    for (const FBladeSegment& Segment : Trajectory.Segments)
     {
         ++LastDiagnostics.IncomingSegments;
-        const float SegmentTimeUntilContact = IncomingSegment.TimeSeconds - CurrentIncomingSourceTime;
-        if (SegmentTimeUntilContact < MinimumTimeToContact) { ++LastDiagnostics.ExpiredSegments; continue; }
 
-        const FVector IncomingBaseWorld = AttackerCommittedTransform.TransformPosition(IncomingSegment.Base);
-        const FVector IncomingTipWorld = AttackerCommittedTransform.TransformPosition(IncomingSegment.Tip);
-        const FVector IncomingDirection = (IncomingTipWorld - IncomingBaseWorld).GetSafeNormal();
-        if (IncomingDirection.IsNearlyZero()) continue;
+        const float TimeUntil = Segment.TimeSeconds - CurrentSourceTime;
+        if (TimeUntil < MinimumTimeToContact)
+        {
+            ++LastDiagnostics.ExpiredSegments;
+            continue;
+        }
 
-        FVector BasisA = FVector::CrossProduct(IncomingDirection, FVector::UpVector);
-        if (BasisA.IsNearlyZero()) BasisA = FVector::CrossProduct(IncomingDirection, FVector::ForwardVector);
+        const FVector IncomingBase =
+            AttackerTransform.TransformPosition(Segment.Base);
+        const FVector IncomingTip =
+            AttackerTransform.TransformPosition(Segment.Tip);
+        const FVector IncomingDir =
+            (IncomingTip - IncomingBase).GetSafeNormal();
+        if (IncomingDir.IsNearlyZero()) continue;
+
+        FVector BasisA = FVector::CrossProduct(IncomingDir, FVector::UpVector);
+        if (BasisA.IsNearlyZero())
+            BasisA = FVector::CrossProduct(IncomingDir, FVector::ForwardVector);
         BasisA.Normalize();
-        const FVector BasisB = FVector::CrossProduct(IncomingDirection, BasisA).GetSafeNormal();
+        const FVector BasisB =
+            FVector::CrossProduct(IncomingDir, BasisA).GetSafeNormal();
 
         for (int32 ContactIndex = 0; ContactIndex < IncomingContactCount; ++ContactIndex)
         {
-            const float IncomingAlpha = static_cast<float>(ContactIndex) / static_cast<float>(IncomingContactCount - 1);
-            const FVector IncomingContactWorld = FMath::Lerp(IncomingBaseWorld, IncomingTipWorld, IncomingAlpha);
+            const float ContactSampleAlpha =
+                float(ContactIndex) / float(IncomingContactCount - 1);
+            const float IncomingAlpha =
+                FMath::Lerp(
+                    FMath::Clamp(MinimumIncomingBladeFraction, 0.f, 1.f),
+                    FMath::Clamp(MaximumIncomingBladeFraction,
+                        MinimumIncomingBladeFraction, 1.f),
+                    ContactSampleAlpha);
+            const FVector Contact =
+                FMath::Lerp(IncomingBase, IncomingTip, IncomingAlpha);
             ++LastDiagnostics.ContactPoints;
 
-            const float MaximumPossibleReach = ArmLength + BladeLength * MaxBladeFraction;
-            if (FVector::Distance(ShoulderWorld, IncomingContactWorld) > MaximumPossibleReach)
-            { ++LastDiagnostics.BroadReachRejected; continue; }
+            const float MaxPossibleReach =
+                ArmLength + BladeLength * MaxFraction;
+            if (FVector::Distance(Shoulder, Contact) > MaxPossibleReach)
+            {
+                ++LastDiagnostics.BroadReachRejected;
+                continue;
+            }
 
             for (int32 FractionIndex = 0; FractionIndex < BladeFractionCount; ++FractionIndex)
             {
-                const float FractionAlpha = static_cast<float>(FractionIndex) / static_cast<float>(BladeFractionCount - 1);
-                const float DefenderBladeFraction = FMath::Lerp(MinBladeFraction, MaxBladeFraction, FractionAlpha);
+                const float FractionAlpha =
+                    float(FractionIndex) / float(BladeFractionCount - 1);
+                const float DefenderFraction =
+                    FMath::Lerp(MinFraction, MaxFraction, FractionAlpha);
 
-                for (int32 CrossingAngleIndex = 0; CrossingAngleIndex < CrossingAngleCount; ++CrossingAngleIndex)
+                for (int32 CrossingIndex = 0; CrossingIndex < CrossingCount; ++CrossingIndex)
                 {
                     const float CrossingAlpha =
-                        static_cast<float>(CrossingAngleIndex) / static_cast<float>(CrossingAngleCount - 1);
-                    const float CrossingAngleDegrees = FMath::Lerp(MinimumCrossingAngle, 90.f, CrossingAlpha);
-                    const float CrossingAngleRadians = FMath::DegreesToRadians(CrossingAngleDegrees);
-                    const float ParallelAmount = FMath::Cos(CrossingAngleRadians);
-                    const float PerpendicularAmount = FMath::Sin(CrossingAngleRadians);
+                        float(CrossingIndex) / float(CrossingCount - 1);
+                    const float CrossingDeg =
+                        FMath::Lerp(MinimumIntersectionAngleDegrees, 90.f, CrossingAlpha);
+                    const float CrossingRad = FMath::DegreesToRadians(CrossingDeg);
 
                     for (int32 OrientationIndex = 0; OrientationIndex < OrientationCount; ++OrientationIndex)
                     {
-                        const float AroundAngle =
-                            2.f * PI * static_cast<float>(OrientationIndex) / static_cast<float>(OrientationCount);
-                        const FVector RingDirection =
-                            BasisA * FMath::Cos(AroundAngle) + BasisB * FMath::Sin(AroundAngle);
-                        const FVector DefenseDirection =
-                            (IncomingDirection * ParallelAmount + RingDirection * PerpendicularAmount).GetSafeNormal();
-                        if (DefenseDirection.IsNearlyZero()) continue;
+                        const float Around =
+                            2.f * PI * float(OrientationIndex) / float(OrientationCount);
+                        const FVector Ring =
+                            BasisA * FMath::Cos(Around) + BasisB * FMath::Sin(Around);
 
-                        FIronboundParryCandidate Candidate;
+                        const FVector DefenseDirection =
+                            (IncomingDir * FMath::Cos(CrossingRad) +
+                             Ring * FMath::Sin(CrossingRad)).GetSafeNormal();
+
                         ++LastDiagnostics.GeneratedCandidates;
 
-                        if (!EvaluateCandidate(ShoulderWorld, CurrentElbowWorld, IncomingBaseWorld, IncomingTipWorld,
-                            IncomingContactWorld, IncomingDirection, IncomingSegment.TimeSeconds, DefenseDirection,
-                            DefenderBladeFraction, BladeLength, CurrentWeaponTransform, CurrentDefenseBase,
-                            CurrentDefenseDirection, Candidate)) continue;
+                        FIronboundParryCandidate Candidate;
+                        if (!EvaluateCandidate(
+                            Shoulder, CurrentElbow,
+                            IncomingBase, IncomingTip, Contact, IncomingDir,
+                            Segment.TimeSeconds, IncomingAlpha,
+                            DefenseDirection, DefenderFraction,
+                            BladeLength, CurrentWeaponTransform, CurrentDefenseBase,
+                            CurrentDefenseDirection, Candidate))
+                            continue;
 
-                        if (Candidate.SelectionCost < BestCost)
+                        if (Candidate.Quality > BestQuality)
                         {
-                            BestCost = Candidate.SelectionCost;
+                            BestQuality = Candidate.Quality;
                             OutCandidate = Candidate;
-                            LastDiagnostics.BestTimeUntilContact = Candidate.TimeUntilContact;
-                            LastDiagnostics.BestRequiredHandSpeed = Candidate.RequiredHandSpeed;
-                            LastDiagnostics.BestRequiredBladeAngularSpeed = Candidate.RequiredBladeAngularSpeed;
+
+                            LastDiagnostics.BestTimeUntilContact =
+                                Candidate.TimeUntilContact;
+                            LastDiagnostics.BestRequiredHandSpeed =
+                                Candidate.RequiredHandSpeed;
+                            LastDiagnostics.BestRequiredBladeAngularSpeed =
+                                Candidate.RequiredBladeAngularSpeed;
+                            LastDiagnostics.BestQuality =
+                                Candidate.Quality;
                         }
                     }
                 }
@@ -647,7 +730,8 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
     }
 
     if (!OutCandidate.bValid)
-        LastParryEarlyExitReason = TEXT("solver evaluated trajectory but found no valid candidate");
+        LastParryEarlyExitReason =
+            TEXT("no anatomically useful intercept survived hard constraints");
 
     LogDiagnosticsOnce();
     return OutCandidate.bValid;
@@ -659,55 +743,83 @@ void UIronboundParryComponent::LogDiagnosticsOnce() const
     bDiagnosticsLoggedForObservedAttack = true;
 
     UE_LOG(LogTemp, Warning,
-        TEXT("ParryDiag [%s] attacker=%s | reason=%s | seg=%d expired=%d contact=%d reachFail=%d gen=%d angleFail=%d elbowFail=%d timeFail=%d speedFail=%d valid=%d | best t=%.3f hand=%.0f blade=%.0f"),
-        *GetNameSafe(GetOwner()), *GetNameSafe(ObservedAttacker.Get()),
-        LastParryEarlyExitReason.IsEmpty() ? TEXT("valid candidate found") : *LastParryEarlyExitReason,
-        LastDiagnostics.IncomingSegments, LastDiagnostics.ExpiredSegments, LastDiagnostics.ContactPoints,
-        LastDiagnostics.BroadReachRejected, LastDiagnostics.GeneratedCandidates, LastDiagnostics.AngleRejected,
-        LastDiagnostics.ElbowRejected, LastDiagnostics.TimingRejected, LastDiagnostics.SpeedRejected,
-        LastDiagnostics.ValidCandidates, LastDiagnostics.BestTimeUntilContact,
-        LastDiagnostics.BestRequiredHandSpeed, LastDiagnostics.BestRequiredBladeAngularSpeed);
+        TEXT("ParryDiag [%s] gen=%d valid=%d | reach=%d angle=%d anatomy=%d body=%d time=%d speed=%d | bestQ=%.2f t=%.3f hand=%.0f blade=%.0f | %s"),
+        *GetNameSafe(GetOwner()),
+        LastDiagnostics.GeneratedCandidates, LastDiagnostics.ValidCandidates,
+        LastDiagnostics.BroadReachRejected, LastDiagnostics.AngleRejected,
+        LastDiagnostics.AnatomyRejected, LastDiagnostics.BodyRejected,
+        LastDiagnostics.TimingRejected, LastDiagnostics.SpeedRejected,
+        LastDiagnostics.BestQuality, LastDiagnostics.BestTimeUntilContact,
+        LastDiagnostics.BestRequiredHandSpeed,
+        LastDiagnostics.BestRequiredBladeAngularSpeed,
+        LastParryEarlyExitReason.IsEmpty() ? TEXT("candidate locked") : *LastParryEarlyExitReason);
+}
+
+void UIronboundParryComponent::DrawAnatomyDebug() const
+{
+    if (!FighterMesh) return;
+
+    const FVector Shoulder = FighterMesh->GetSocketLocation(UpperArmBone);
+    const FVector Elbow = FighterMesh->GetSocketLocation(LowerArmBone);
+    const FVector Hand = FighterMesh->GetSocketLocation(HandBone);
+
+    DrawDebugSphere(GetWorld(), Shoulder, 4.f, 10, FColor::Cyan, false, 0.f, 0, 1.f);
+    DrawDebugSphere(GetWorld(), Elbow, 4.f, 10, FColor::Yellow, false, 0.f, 0, 1.f);
+    DrawDebugSphere(GetWorld(), Hand, 4.f, 10, FColor::Green, false, 0.f, 0, 1.f);
+}
+
+void UIronboundParryComponent::DrawParrySolutionDebug() const
+{
+    if (!bHasActiveParryCandidate || !FighterMesh) return;
+
+    const FIronboundParryCandidate& C = ActiveParryCandidate;
+
+    DrawDebugLine(GetWorld(), C.IncomingBase, C.IncomingTip,
+        FColor::Red, false, 0.f, 0, 6.f);
+    DrawDebugLine(GetWorld(), C.DefenseBase, C.DefenseTip,
+        FColor::Cyan, false, 0.f, 0, 6.f);
+    DrawDebugSphere(GetWorld(), C.ContactPoint, 6.f, 12,
+        FColor::Green, false, 0.f, 0, 2.f);
+
+    // Locked final arm = orange. Executed/moving targets = purple/blue.
+    const FVector Shoulder = FighterMesh->GetSocketLocation(UpperArmBone);
+    DrawDebugLine(GetWorld(), Shoulder, C.RequiredElbowPosition,
+        FColor::Orange, false, 0.f, 0, 3.f);
+    DrawDebugLine(GetWorld(), C.RequiredElbowPosition, C.RequiredHandPosition,
+        FColor::Orange, false, 0.f, 0, 3.f);
+
+    DrawDebugSphere(GetWorld(), ExecutedElbowPosition, 4.f, 10,
+        FColor::Purple, false, 0.f, 0, 2.f);
+    DrawDebugSphere(GetWorld(), ExecutedHandTransform.GetLocation(), 4.f, 10,
+        FColor::Blue, false, 0.f, 0, 2.f);
+
+    const FString Text = FString::Printf(
+        TEXT("Q %.2f | cross %.0f | enemyBlade %.0f%% | elbow %.0f | t %.3f | %s"),
+        C.Quality, C.IntersectionAngleDegrees, C.IncomingBladeFraction * 100.f,
+        C.ElbowAngleDegrees, C.TimeUntilContact,
+        ParryState == EIronboundParryState::Holding ? TEXT("HOLD") : TEXT("MOVE"));
+
+    DrawDebugString(GetWorld(), C.ContactPoint + FVector(0.f, 0.f, 14.f),
+        Text, nullptr, FColor::White, 0.f, true);
 }
 
 void UIronboundParryComponent::DrawDiagnosticsDebug() const
 {
     if (!bObservedCommittedAttack || !GetWorld() || !GetOwner()) return;
 
-    const FString Summary = FString::Printf(
-        TEXT("ParryDiag seg=%d expired=%d contact=%d reachFail=%d gen=%d angleFail=%d elbowFail=%d timeFail=%d speedFail=%d valid=%d | best t=%.3f hand=%.0f blade=%.0f"),
-        LastDiagnostics.IncomingSegments, LastDiagnostics.ExpiredSegments, LastDiagnostics.ContactPoints,
-        LastDiagnostics.BroadReachRejected, LastDiagnostics.GeneratedCandidates, LastDiagnostics.AngleRejected,
-        LastDiagnostics.ElbowRejected, LastDiagnostics.TimingRejected, LastDiagnostics.SpeedRejected,
-        LastDiagnostics.ValidCandidates, LastDiagnostics.BestTimeUntilContact,
-        LastDiagnostics.BestRequiredHandSpeed, LastDiagnostics.BestRequiredBladeAngularSpeed);
+    const FString Text = FString::Printf(
+        TEXT("Parry gen=%d valid=%d | anatomy=%d body=%d speed=%d | Q=%.2f"),
+        LastDiagnostics.GeneratedCandidates,
+        LastDiagnostics.ValidCandidates,
+        LastDiagnostics.AnatomyRejected,
+        LastDiagnostics.BodyRejected,
+        LastDiagnostics.SpeedRejected,
+        LastDiagnostics.BestQuality);
 
-    DrawDebugString(GetWorld(), GetOwner()->GetActorLocation() + FVector(0.f, 0.f, 220.f),
-        Summary, nullptr, LastDiagnostics.ValidCandidates > 0 ? FColor::Green : FColor::Red, 0.f, true);
-}
-
-void UIronboundParryComponent::DrawParrySolutionDebug() const
-{
-    if (!bHasActiveParryCandidate) return;
-
-    const FIronboundParryCandidate& BestCandidate = ActiveParryCandidate;
-
-    DrawDebugLine(GetWorld(), BestCandidate.IncomingBase, BestCandidate.IncomingTip, FColor::Red, false, 0.f, 0, 7.f);
-    DrawDebugSphere(GetWorld(), BestCandidate.IncomingBase, 3.f, 8, FColor::Red, false, 0.f, 0, 1.f);
-    DrawDebugSphere(GetWorld(), BestCandidate.IncomingTip, 3.f, 8, FColor::Red, false, 0.f, 0, 1.f);
-    DrawDebugLine(GetWorld(), BestCandidate.DefenseBase, BestCandidate.DefenseTip, FColor::Cyan, false, 0.f, 0, 7.f);
-    DrawDebugSphere(GetWorld(), BestCandidate.ContactPoint, 7.f, 16, FColor::Green, false, 0.f, 0, 3.f);
-    DrawDebugSphere(GetWorld(), BestCandidate.RequiredHandPosition, 5.f, 12, FColor::Magenta, false, 0.f, 0, 2.f);
-    DrawDebugSphere(GetWorld(), BestCandidate.RequiredElbowPosition, 5.f, 12, FColor::Orange, false, 0.f, 0, 2.5f);
-
-    const FVector ShoulderWorld = FighterMesh->GetSocketLocation(UpperArmBone);
-    DrawDebugLine(GetWorld(), ShoulderWorld, BestCandidate.RequiredElbowPosition, FColor::Orange, false, 0.f, 0, 4.f);
-    DrawDebugLine(GetWorld(), BestCandidate.RequiredElbowPosition, BestCandidate.RequiredHandPosition,
-        FColor::Orange, false, 0.f, 0, 4.f);
-
-    const FString TimingText = FString::Printf(
-        TEXT("Parry t=%.3fs | hand=%.0f cm/s | blade=%.0f deg/s"),
-        BestCandidate.TimeUntilContact, BestCandidate.RequiredHandSpeed, BestCandidate.RequiredBladeAngularSpeed);
-
-    DrawDebugString(GetWorld(), BestCandidate.ContactPoint + FVector(0.f, 0.f, 12.f),
-        TimingText, nullptr, FColor::White, 0.f, true);
+    DrawDebugString(
+        GetWorld(),
+        GetOwner()->GetActorLocation() + FVector(0.f, 0.f, 220.f),
+        Text, nullptr,
+        LastDiagnostics.ValidCandidates > 0 ? FColor::Green : FColor::Red,
+        0.f, true);
 }
