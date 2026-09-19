@@ -86,15 +86,45 @@ void UIronboundParryComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 
     UpdateAttackTimingState();
 
-    FIronboundParryCandidate BestCandidate;
-    bHasActiveParryCandidate = FindBestParryCandidate(BestCandidate);
-    ActiveParryCandidate = bHasActiveParryCandidate ? BestCandidate : FIronboundParryCandidate();
+    // Before commitment we are allowed to search for a solution. The instant
+    // one is accepted, it is locked and the solver stops running for this attack.
+    if (!bHasActiveParryCandidate && bObservedCommittedAttack)
+    {
+        ParryState = bReactionReady
+            ? EIronboundParryState::Moving
+            : (bAttackRecognized ? EIronboundParryState::Reacting : EIronboundParryState::Observing);
+
+        if (bReactionReady)
+        {
+            FIronboundParryCandidate BestCandidate;
+            if (FindBestParryCandidate(BestCandidate))
+            {
+                ActiveParryCandidate = BestCandidate;
+                bHasActiveParryCandidate = true;
+                ParryState = EIronboundParryState::Moving;
+
+                UE_LOG(LogTemp, Warning,
+                    TEXT("Parry [%s]: LOCKED candidate | t=%.3fs hand=%.0f cm/s blade=%.0f deg/s"),
+                    *GetNameSafe(GetOwner()),
+                    ActiveParryCandidate.TimeUntilContact,
+                    ActiveParryCandidate.RequiredHandSpeed,
+                    ActiveParryCandidate.RequiredBladeAngularSpeed);
+            }
+        }
+    }
 
     if (!bDrawParryDebug) return;
 
     DrawAnatomyDebug();
     DrawParrySolutionDebug();
     DrawDiagnosticsDebug();
+}
+
+void UIronboundParryComponent::ResetParryAction()
+{
+    ActiveParryCandidate = FIronboundParryCandidate();
+    bHasActiveParryCandidate = false;
+    ParryState = EIronboundParryState::Observing;
 }
 
 void UIronboundParryComponent::UpdateAttackTimingState()
@@ -106,9 +136,11 @@ void UIronboundParryComponent::UpdateAttackTimingState()
 
     if (!bCommitted)
     {
+        ResetParryAction();
         bObservedCommittedAttack = false;
         bAttackRecognized = false;
         bReactionReady = false;
+        ObservationWorldTime = 0.f;
         RecognitionWorldTime = 0.f;
         ObservedAttacker.Reset();
         bDiagnosticsLoggedForObservedAttack = false;
@@ -118,32 +150,40 @@ void UIronboundParryComponent::UpdateAttackTimingState()
 
     if (!bObservedCommittedAttack || ObservedAttacker.Get() != Target)
     {
+        ResetParryAction();
         bObservedCommittedAttack = true;
         bAttackRecognized = false;
         bReactionReady = false;
         ObservedAttacker = Target;
+        ObservationWorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
         RecognitionWorldTime = 0.f;
         bDiagnosticsLoggedForObservedAttack = false;
         LastParryEarlyExitReason.Reset();
-        UE_LOG(LogTemp, Warning, TEXT("ParryDiag [%s]: observed committed attack from %s | waiting for recognizable blade motion"),
-            *GetNameSafe(GetOwner()), *GetNameSafe(Target));
+        UE_LOG(LogTemp, Warning, TEXT("ParryDiag [%s]: observed committed attack from %s | perception delay %.3fs"),
+            *GetNameSafe(GetOwner()), *GetNameSafe(Target), PerceptionDelaySeconds);
         return;
     }
 
     if (!bAttackRecognized)
     {
-        float CurrentSourceTime = 0.f;
-        if (!GetIncomingSourcePlaybackTime(CurrentSourceTime)) return;
+        if (!GetWorld()) return;
+        const float ElapsedSinceObservation = GetWorld()->GetTimeSeconds() - ObservationWorldTime;
+        if (ElapsedSinceObservation + KINDA_SMALL_NUMBER < PerceptionDelaySeconds) return;
 
         const FBladeTrajectory& IncomingTrajectory = TargetExecution->GetCommittedTrajectory();
         if (!IncomingTrajectory.bValid) return;
-        if (CurrentSourceTime + KINDA_SMALL_NUMBER < IncomingTrajectory.ActiveStartTime) return;
+
+        float CurrentSourceTime = 0.f;
+        const bool bHasSourceTime = GetIncomingSourcePlaybackTime(CurrentSourceTime);
 
         bAttackRecognized = true;
-        RecognitionWorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+        ParryState = EIronboundParryState::Reacting;
+        RecognitionWorldTime = GetWorld()->GetTimeSeconds();
         UE_LOG(LogTemp, Warning,
-            TEXT("ParryDiag [%s]: attack recognized | source %.3fs | recognition threshold %.3fs | reaction delay %.3fs"),
-            *GetNameSafe(GetOwner()), CurrentSourceTime, IncomingTrajectory.ActiveStartTime, ReactionDelaySeconds);
+            TEXT("ParryDiag [%s]: attack perceived %.3fs after commit | attacker source=%s | active start %.3fs | reaction delay %.3fs"),
+            *GetNameSafe(GetOwner()), ElapsedSinceObservation,
+            bHasSourceTime ? *FString::Printf(TEXT("%.3fs"), CurrentSourceTime) : TEXT("unavailable"),
+            IncomingTrajectory.ActiveStartTime, ReactionDelaySeconds);
         return;
     }
 
@@ -153,6 +193,7 @@ void UIronboundParryComponent::UpdateAttackTimingState()
         if (ElapsedSinceRecognition >= ReactionDelaySeconds)
         {
             bReactionReady = true;
+            ParryState = EIronboundParryState::Moving;
             float SourceTime = 0.f;
             const bool bHasSourceTime = GetIncomingSourcePlaybackTime(SourceTime);
             UE_LOG(LogTemp, Warning,
@@ -386,6 +427,34 @@ bool UIronboundParryComponent::EvaluateCandidate(
     const FVector CurrentHandWorld = FighterMesh->GetSocketLocation(HandBone);
     const float TranslationCost = FVector::Distance(CurrentHandWorld, RequiredHandWorld);
 
+    // Reject cheap wrist-only solutions. A committed defensive action should
+    // visibly reposition the arm, not merely rotate the weapon in place.
+    if (TranslationCost + KINDA_SMALL_NUMBER < MinimumHandDisplacement)
+    {
+        ++LastDiagnostics.ElbowRejected;
+        return false;
+    }
+
+    if (FighterMesh->GetBoneIndex(PelvisBone) != INDEX_NONE)
+    {
+        const float PelvisZ = FighterMesh->GetSocketLocation(PelvisBone).Z;
+        if (RequiredHandWorld.Z < PelvisZ + MinimumHandHeightAbovePelvis)
+        {
+            ++LastDiagnostics.ElbowRejected;
+            return false;
+        }
+    }
+
+    const FVector UpperArmFromElbow = (ShoulderWorld - CandidateElbow).GetSafeNormal();
+    const FVector ForearmFromElbow = (RequiredHandWorld - CandidateElbow).GetSafeNormal();
+    const float ElbowDot = FMath::Clamp(FVector::DotProduct(UpperArmFromElbow, ForearmFromElbow), -1.f, 1.f);
+    const float ElbowAngleDegrees = FMath::RadiansToDegrees(FMath::Acos(ElbowDot));
+    if (ElbowAngleDegrees < MinimumElbowAngleDegrees || ElbowAngleDegrees > MaximumElbowAngleDegrees)
+    {
+        ++LastDiagnostics.ElbowRejected;
+        return false;
+    }
+
     const float RotationAbsDot = FMath::Clamp(
         FMath::Abs(FVector::DotProduct(CurrentDefenseDirection, NormalizedDefenseDirection)), 0.f, 1.f);
     const float RotationDegrees = FMath::RadiansToDegrees(FMath::Acos(RotationAbsDot));
@@ -416,7 +485,12 @@ bool UIronboundParryComponent::EvaluateCandidate(
     const float BladeSpeedUtilization =
         MaxParryBladeAngularSpeed > KINDA_SMALL_NUMBER ? RequiredBladeAngularSpeed / MaxParryBladeAngularSpeed : 1.f;
     const float TimingPressure = FMath::Max(HandSpeedUtilization, BladeSpeedUtilization);
-    const float SelectionCost = MovementCost + TimingPressureCostWeight * FMath::Square(TimingPressure);
+    const float DefensivePosePenalty =
+        FMath::Abs(TranslationCost - PreferredHandDisplacement) * DefensivePoseCostWeight;
+    const float SelectionCost =
+        MovementCost +
+        DefensivePosePenalty +
+        TimingPressureCostWeight * FMath::Square(TimingPressure);
 
     OutCandidate.ContactPoint = IncomingContactWorld;
     OutCandidate.IncomingBase = IncomingBaseWorld;

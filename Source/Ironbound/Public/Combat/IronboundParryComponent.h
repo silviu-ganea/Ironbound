@@ -7,6 +7,15 @@
 class USkeletalMeshComponent;
 class UIronboundCombatFocusComponent;
 
+UENUM(BlueprintType)
+enum class EIronboundParryState : uint8
+{
+    Observing,
+    Reacting,
+    Moving,
+    Holding
+};
+
 USTRUCT()
 struct FIronboundParryDiagnostics
 {
@@ -77,6 +86,9 @@ public:
     UIronboundParryComponent();
 
     UFUNCTION(BlueprintPure, Category="Combat|Parry")
+    EIronboundParryState GetParryState() const { return ParryState; }
+
+    UFUNCTION(BlueprintPure, Category="Combat|Parry")
     bool HasActiveParryPose() const { return bHasActiveParryCandidate; }
 
     UFUNCTION(BlueprintPure, Category="Combat|Parry")
@@ -111,6 +123,9 @@ protected:
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy")
     FName HandBone = TEXT("hand_r");
 
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy")
+    FName PelvisBone = TEXT("pelvis");
+
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="0.0"))
     float ArmReachMargin = 1.0f;
 
@@ -122,6 +137,26 @@ protected:
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Anatomy", meta=(ClampMin="0.0", ClampMax="1.0"))
     float MinimumElbowSideDot = 0.0f;
+
+    // Defensive-pose constraints. These deliberately prevent the solver from
+    // choosing tiny wrist-only corrections as the cheapest parry.
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
+    float MinimumHandDisplacement = 30.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
+    float PreferredHandDisplacement = 38.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
+    float MinimumHandHeightAbovePelvis = 8.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0", ClampMax="180.0"))
+    float MinimumElbowAngleDegrees = 40.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0", ClampMax="180.0"))
+    float MaximumElbowAngleDegrees = 155.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Defensive Pose", meta=(ClampMin="0.0"))
+    float DefensivePoseCostWeight = 1.25f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Weapon", meta=(ClampMin="0.0", ClampMax="1.0"))
     float MinParryBladeFraction = 0.20f;
@@ -150,8 +185,14 @@ protected:
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0"))
     float RotationCostWeight = 0.35f;
 
+    // Delay from observing a committed attack to perceiving it. At zero, the
+    // defender can forecast from the committed trajectory immediately instead
+    // of waiting for the blade to reach ActiveStartTime.
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
-    float ReactionDelaySeconds = 0.15f;
+    float PerceptionDelaySeconds = 0.0f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
+    float ReactionDelaySeconds = 0.0f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="1.0"))
     float MaxParryHandSpeed = 500.f;
@@ -179,6 +220,7 @@ private:
     bool bObservedCommittedAttack = false;
     bool bAttackRecognized = false;
     bool bReactionReady = false;
+    float ObservationWorldTime = 0.f;
     float RecognitionWorldTime = 0.f;
 
     mutable bool bDiagnosticsLoggedForObservedAttack = false;
@@ -194,7 +236,9 @@ private:
     // from debug visualization.
     FIronboundParryCandidate ActiveParryCandidate;
     bool bHasActiveParryCandidate = false;
+    EIronboundParryState ParryState = EIronboundParryState::Observing;
 
+    void ResetParryAction();
     bool CalculateArmDimensions();
     void UpdateAttackTimingState();
     bool GetIncomingSourcePlaybackTime(float& OutSourceTime) const;

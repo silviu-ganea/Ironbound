@@ -40,5 +40,13 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category="Combat|Parry")
 	FVector ParryElbowTarget = FVector::ZeroVector;
 
+	/** Hand target converted into the owning skeletal mesh component space for Control Rig. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category="Combat|Parry")
+	FTransform ParryHandTargetComponentSpace = FTransform::Identity;
+
+	/** Elbow/pole target converted into the owning skeletal mesh component space for Control Rig. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category="Combat|Parry")
+	FVector ParryElbowTargetComponentSpace = FVector::ZeroVector;
+
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
 };

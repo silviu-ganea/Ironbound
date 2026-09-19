@@ -45,6 +45,29 @@ void UIronboundCombatAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			? Parry->GetActiveParryElbowPosition()
 			: FVector::ZeroVector;
 
+	// Control Rig operates in the skeletal mesh component/global space.
+	// Keep the original world-space values above for diagnostics and expose
+	// component-space equivalents specifically for the rig.
+	if (USkeletalMeshComponent* AnimMesh = GetSkelMeshComponent())
+	{
+		const FTransform& MeshWorldTransform = AnimMesh->GetComponentTransform();
+
+		ParryHandTargetComponentSpace =
+			ParryIKActive
+				? ParryHandTarget.GetRelativeTransform(MeshWorldTransform)
+				: FTransform::Identity;
+
+		ParryElbowTargetComponentSpace =
+			ParryIKActive
+				? MeshWorldTransform.InverseTransformPosition(ParryElbowTarget)
+				: FVector::ZeroVector;
+	}
+	else
+	{
+		ParryHandTargetComponentSpace = FTransform::Identity;
+		ParryElbowTargetComponentSpace = FVector::ZeroVector;
+	}
+
 	if (Target)
 	{
 		const auto* Mesh =
