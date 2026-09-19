@@ -6,6 +6,7 @@
 #include "IronboundCombatExecutionComponent.generated.h"
 
 class AAIController;
+class UDataTable;
 class USkeletalMeshComponent;
 class UAnimSequenceBase;
 class UIronboundEquipmentComponent;
@@ -23,19 +24,28 @@ enum class EIronboundAttackPhase : uint8
 };
 
 
-/** Movement/action arbitration. AI selects a target and move; this component executes the request. */
-UCLASS(ClassGroup=(Ironbound), meta=(BlueprintSpawnableComponent))
-class IRONBOUND_API UIronboundCombatExecutionComponent : public UActorComponent
+/**
+ * Movement/action arbitration.
+ * AI selects target and move; this component executes the request.
+ */
+UCLASS(
+	ClassGroup=(Ironbound),
+	meta=(BlueprintSpawnableComponent))
+class IRONBOUND_API UIronboundCombatExecutionComponent :
+	public UActorComponent
 {
 	GENERATED_BODY()
 
 public:
+
 	UIronboundCombatExecutionComponent();
+
 
 	// State
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
-	EIronboundAttackPhase Phase = EIronboundAttackPhase::Idle;
+	EIronboundAttackPhase Phase =
+		EIronboundAttackPhase::Idle;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	FTransform PlannedTransform;
@@ -52,13 +62,40 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
 	float MaxCommittedFacingError = 0.f;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	FName PlannedTargetRegion = NAME_None;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	FName PlannedTargetBone = NAME_None;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Combat")
+	float PlannedTargetScore = 0.f;
+
 
 	// Settings
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat", meta=(ClampMin="0.1"))
+	/**
+	 * Global anatomical target definitions used by the attack planner.
+	 * Assign DT_CombatTargets to this on the pawn Blueprint.
+	 */
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadWrite,
+		Category="Combat|Targets")
+	TObjectPtr<UDataTable> CombatTargets;
+
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadWrite,
+		Category="Combat",
+		meta=(ClampMin="0.1"))
 	float ArrivalTolerance = 8.f;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat", meta=(ClampMin="0.1"))
+	UPROPERTY(
+		EditAnywhere,
+		BlueprintReadWrite,
+		Category="Combat",
+		meta=(ClampMin="0.1"))
 	float FacingTolerance = 3.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat")
@@ -73,20 +110,21 @@ public:
 
 	// Attack
 
-	/** Returns true once, only after the ACTUAL pose is aligned, stopped and predicts contact. */
+	/**
+	 * The caller now supplies only target + source animation.
+	 *
+	 * Trajectory window, sampling, target bones, target desirability,
+	 * engagement distance and contact tolerance are owned by the combat
+	 * systems rather than by the move row.
+	 */
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
 	bool PrepareAttack(
 		USkeletalMeshComponent* TargetMesh,
-		UAnimSequenceBase* Sequence,
-		float StartTime,
-		float EndTime,
-		int32 NumSamples,
-		const TArray<FName>& AllowedBones,
-		float AcceptanceRadius);
+		UAnimSequenceBase* Sequence);
 
-	/** Feed this into Mover's orientation input; never SetActorRotation for combat. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
-	FVector ResolveOrientationIntent(FVector LocomotionIntent) const;
+	FVector ResolveOrientationIntent(
+		FVector LocomotionIntent) const;
 
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
 	void FinishAttack();
@@ -97,101 +135,83 @@ public:
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
 	bool CanPlayAttack() const;
 
-	/** Authoritative busy state, including recovery; legacy animation flags must not gate new requests. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
 	bool IsCommitted() const;
 
-	/** True while the fighter is at the attack stance but still needs to establish attack facing. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
 	bool IsAligning() const;
 
-	/** Signed yaw from current facing to the planned attack facing. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat")
 	float GetCombatFacingDelta() const;
 
 
-	// Tick
-
 	virtual void TickComponent(
 		float DeltaTime,
 		ELevelTick TickType,
-		FActorComponentTickFunction* ThisTickFunction) override;
+		FActorComponentTickFunction*
+			ThisTickFunction) override;
 
 
 private:
-
-	// State queries
 
 	bool IsAligningOrCommitted() const;
 	bool HasTarget() const;
 	bool HasAttackTimedOut(float Now) const;
 	bool IsAtAttackPosition() const;
-	bool IsReadyToCommit(float AcceptanceRadius) const;
-
-
-	// Orientation
+	bool IsReadyToCommit() const;
 
 	FVector GetTargetFacingIntent() const;
 
-
-	// Attack preparation
-
-	bool IsValidAttackRequest(USkeletalMeshComponent* TargetMesh) const;
+	bool IsValidAttackRequest(
+		USkeletalMeshComponent* TargetMesh) const;
 
 	bool BuildAttackTrajectory(
 		UAnimSequenceBase* Sequence,
-		float StartTime,
-		float EndTime,
-		int32 NumSamples,
 		FBladeTrajectory& OutTrajectory) const;
 
 	bool SolveAttackPlan(
 		USkeletalMeshComponent* TargetMesh,
-		const FBladeTrajectory& Trajectory,
-		const TArray<FName>& AllowedBones,
-		float AcceptanceRadius);
+		const FBladeTrajectory& Trajectory);
 
 	void ApproachAttackPosition();
+
 	void AlignAttack(
 		USkeletalMeshComponent* TargetMesh,
-		const FBladeTrajectory& Trajectory,
-		const TArray<FName>& AllowedBones);
+		const FBladeTrajectory& Trajectory);
 
 	void CommitAttack(
 		UAnimSequenceBase* Sequence,
 		const FBladeTrajectory& Trajectory);
 
-
-	// Tick updates
-
 	void UpdateMeasuredSpeed(float DeltaTime);
 	void UpdateCommittedFacingError();
-
-
-	// Debug
 
 	void DrawAttackDebug();
 	void DrawIntendedBladeTrajectory();
 	void DrawActualBladeTrajectory();
 
-
-	// Components
-
 	AAIController* GetAIController() const;
-	UIronboundEquipmentComponent* GetEquipment() const;
-	UIronboundCombatFocusComponent* GetCombatFocus() const;
 
+	UIronboundEquipmentComponent*
+	GetEquipment() const;
 
-	// Internal state
+	UIronboundCombatFocusComponent*
+	GetCombatFocus() const;
+
 
 	TWeakObjectPtr<AActor> PlannedTarget;
 
 	FBladeTrajectory CommittedTrajectory;
 	FTransform CommittedTransform;
 
-	FVector AttackFacingIntent = FVector::ZeroVector;
-	FVector PreviousTip = FVector::ZeroVector;
-	FVector LastLocation = FVector::ZeroVector;
+	FVector AttackFacingIntent =
+		FVector::ZeroVector;
+
+	FVector PreviousTip =
+		FVector::ZeroVector;
+
+	FVector LastLocation =
+		FVector::ZeroVector;
 
 	float MeasuredSpeed = 0.f;
 	float RecoveryUntil = 0.f;
