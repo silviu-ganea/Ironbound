@@ -1,0 +1,17 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+
+  "instructions": [
+    ".kilo/rules/ironbound.md"
+  ],
+
+  "mcp": {
+    "unreal-mcp": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8000/mcp",
+      "enabled": true,
+      "timeout": 15000,
+      "oauth": false
+    }
+  }
+}
