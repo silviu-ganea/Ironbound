@@ -24,6 +24,7 @@ void UIronboundParryComponent::BeginPlay()
 
     FighterMesh = GetOwner()->FindComponentByClass<USkeletalMeshComponent>();
     CombatFocus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+    CombatBody = GetOwner()->FindComponentByClass<UIronboundCombatBodyComponent>();
 
     if (!FighterMesh)
     {
@@ -103,16 +104,8 @@ void UIronboundParryComponent::TickComponent(
                 InitializeExecutionPose();
                 ParryState = EIronboundParryState::Moving;
 
-                if (auto* Body =
-                    GetOwner()->FindComponentByClass<UIronboundCombatBodyComponent>())
-                {
-                    if (!bTrackingStiffened)
-                    {
-                        PreviousTrackingStrength = Body->WeaponTrackingStrength;
-                        Body->SetWeaponTrackingStrength(ParryGripTrackingStrength);
-                        bTrackingStiffened = true;
-                    }
-                }
+                if (CombatBody)
+                    CombatBody->BeginParryBrace();
 
                 UE_LOG(LogTemp, Warning,
                     TEXT("Parry [%s]: LOCKED quality=%.2f t=%.3f hand=%.0fcm/s blade=%.0fdeg/s cross=%.0f enemyBlade=%.0f%% elbow=%.0f"),
@@ -186,15 +179,8 @@ void UIronboundParryComponent::UpdateExecutionPose(float DeltaTime)
 
 void UIronboundParryComponent::ResetParryAction()
 {
-    if (bTrackingStiffened)
-    {
-        if (auto* Body =
-            GetOwner()->FindComponentByClass<UIronboundCombatBodyComponent>())
-        {
-            Body->SetWeaponTrackingStrength(PreviousTrackingStrength);
-        }
-        bTrackingStiffened = false;
-    }
+    if (CombatBody && CombatBody->IsParryBraced())
+        CombatBody->EndParryBrace();
 
     ActiveParryCandidate = FIronboundParryCandidate();
     bHasActiveParryCandidate = false;
@@ -467,35 +453,6 @@ bool UIronboundParryComponent::EvaluateCandidate(
         Contact - DefenseDir * (BladeLength * DefenderBladeFraction);
     const FVector CandidateTip = CandidateBase + DefenseDir * BladeLength;
 
-    // The blade must actually SCREEN the body region this attack intends to hit.
-    // This is target-relative, not an arbitrary world-height rule.
-    if (!ProtectedPoints.IsEmpty())
-    {
-        float NearestBladeToProtected = TNumericLimits<float>::Max();
-        float BestApproachOffset = -TNumericLimits<float>::Max();
-
-        for (const FVector& ProtectedPoint : ProtectedPoints)
-        {
-            NearestBladeToProtected = FMath::Min(
-                NearestBladeToProtected,
-                FMath::PointDistToSegment(
-                    ProtectedPoint, CandidateBase, CandidateTip));
-
-            BestApproachOffset = FMath::Max(
-                BestApproachOffset,
-                FVector::DotProduct(
-                    Contact - ProtectedPoint,
-                    -IncomingDirection));
-        }
-
-        if (NearestBladeToProtected > MaxProtectionRadiusCm ||
-            BestApproachOffset < MinimumApproachOffsetCm)
-        {
-            ++LastDiagnostics.ProtectionRejected;
-            return false;
-        }
-    }
-
     const UIronboundEquipmentComponent* Equipment =
         GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
     if (!Equipment || !Equipment->Definition) return false;
@@ -590,8 +547,8 @@ bool UIronboundParryComponent::EvaluateCandidate(
     const float IncomingRange =
         FMath::Max(MaximumIncomingBladeFraction - MinimumIncomingBladeFraction, 0.01f);
     const float IncomingTipContactQuality =
-        FMath::Clamp(
-            (IncomingBladeFraction - MinimumIncomingBladeFraction) /
+        1.f - FMath::Clamp(
+            FMath::Abs(IncomingBladeFraction - PreferredIncomingBladeFraction) /
             IncomingRange, 0.f, 1.f);
 
     const float Quality =
@@ -668,47 +625,6 @@ bool UIronboundParryComponent::FindBestParryCandidate(
     if (!GetIncomingSourcePlaybackTime(CurrentSourceTime))
         return false;
 
-    // Build a small protected region around the actual attack target.
-    ProtectedPoints.Reset();
-
-    FName ProtectedBone = TargetExecution->PlannedTargetBone;
-    if (ProtectedBone.IsNone() || FighterMesh->GetBoneIndex(ProtectedBone) == INDEX_NONE)
-        ProtectedBone = TEXT("head");
-
-    if (FighterMesh->GetBoneIndex(ProtectedBone) != INDEX_NONE)
-        ProtectedPoints.Add(FighterMesh->GetSocketLocation(ProtectedBone));
-
-    // Head/upper-body attacks should also screen neck/chest. Duplicates are
-    // harmless, but AddUnique keeps the diagnostic geometry clean.
-    const FName SupportBones[] = { TEXT("neck_01"), TEXT("spine_03") };
-    for (const FName Bone : SupportBones)
-    {
-        if (FighterMesh->GetBoneIndex(Bone) != INDEX_NONE)
-            ProtectedPoints.AddUnique(FighterMesh->GetSocketLocation(Bone));
-    }
-
-    int32 LastOpportunityIndex = Trajectory.Segments.Num() - 1;
-    bool bFoundProtectionThreat = false;
-
-    for (int32 I = 0; I < Trajectory.Segments.Num() && !bFoundProtectionThreat; ++I)
-    {
-        const FVector ThreatBase =
-            AttackerTransform.TransformPosition(Trajectory.Segments[I].Base);
-        const FVector ThreatTip =
-            AttackerTransform.TransformPosition(Trajectory.Segments[I].Tip);
-
-        for (const FVector& ProtectedPoint : ProtectedPoints)
-        {
-            if (FMath::PointDistToSegment(
-                    ProtectedPoint, ThreatBase, ThreatTip) <= ProtectMarginCm)
-            {
-                LastOpportunityIndex = I;
-                bFoundProtectionThreat = true;
-                break;
-            }
-        }
-    }
-
     const int32 IncomingContactCount = FMath::Max(2, IncomingBladeContactSamples);
     const int32 BladeFractionCount = FMath::Max(2, DefenderBladeFractionSamples);
     const int32 OrientationCount = FMath::Max(8, DefenseOrientationSamples);
@@ -716,18 +632,9 @@ bool UIronboundParryComponent::FindBestParryCandidate(
 
     float BestQuality = -TNumericLimits<float>::Max();
 
-    for (int32 SegmentIndex = 0;
-         SegmentIndex < Trajectory.Segments.Num();
-         ++SegmentIndex)
+    for (const FBladeSegment& Segment : Trajectory.Segments)
     {
-        const FBladeSegment& Segment = Trajectory.Segments[SegmentIndex];
         ++LastDiagnostics.IncomingSegments;
-
-        if (bFoundProtectionThreat && SegmentIndex > LastOpportunityIndex)
-        {
-            ++LastDiagnostics.ProtectionRejected;
-            continue;
-        }
 
         const float TimeUntil = Segment.TimeSeconds - CurrentSourceTime;
         if (TimeUntil < MinimumTimeToContact)
@@ -845,12 +752,11 @@ void UIronboundParryComponent::LogDiagnosticsOnce() const
     bDiagnosticsLoggedForObservedAttack = true;
 
     UE_LOG(LogTemp, Warning,
-        TEXT("ParryDiag [%s] gen=%d valid=%d | reach=%d angle=%d anatomy=%d body=%d protect=%d time=%d speed=%d | bestQ=%.2f t=%.3f hand=%.0f blade=%.0f | %s"),
+        TEXT("ParryDiag [%s] gen=%d valid=%d | reach=%d angle=%d anatomy=%d body=%d time=%d speed=%d | bestQ=%.2f t=%.3f hand=%.0f blade=%.0f | %s"),
         *GetNameSafe(GetOwner()),
         LastDiagnostics.GeneratedCandidates, LastDiagnostics.ValidCandidates,
         LastDiagnostics.BroadReachRejected, LastDiagnostics.AngleRejected,
         LastDiagnostics.AnatomyRejected, LastDiagnostics.BodyRejected,
-        LastDiagnostics.ProtectionRejected,
         LastDiagnostics.TimingRejected, LastDiagnostics.SpeedRejected,
         LastDiagnostics.BestQuality, LastDiagnostics.BestTimeUntilContact,
         LastDiagnostics.BestRequiredHandSpeed,
@@ -911,12 +817,11 @@ void UIronboundParryComponent::DrawDiagnosticsDebug() const
     if (!bObservedCommittedAttack || !GetWorld() || !GetOwner()) return;
 
     const FString Text = FString::Printf(
-        TEXT("Parry gen=%d valid=%d | anatomy=%d body=%d protect=%d speed=%d | Q=%.2f"),
+        TEXT("Parry gen=%d valid=%d | anatomy=%d body=%d speed=%d | Q=%.2f"),
         LastDiagnostics.GeneratedCandidates,
         LastDiagnostics.ValidCandidates,
         LastDiagnostics.AnatomyRejected,
         LastDiagnostics.BodyRejected,
-        LastDiagnostics.ProtectionRejected,
         LastDiagnostics.SpeedRejected,
         LastDiagnostics.BestQuality);
 

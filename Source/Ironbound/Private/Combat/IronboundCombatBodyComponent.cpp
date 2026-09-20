@@ -11,12 +11,15 @@
 
 namespace
 {
-	FPhysicsControlData TrackingData(float Linear, float Angular)
+	FPhysicsControlData TrackingData(float Linear, float Angular, float VelocityMultiplier = 1.f)
 	{
 		FPhysicsControlData Data;
 		Data.LinearStrength = Linear;
 		Data.AngularStrength = Angular;
 		Data.LinearDampingRatio = Data.AngularDampingRatio = 1.f;
+		Data.LinearExtraDamping = Data.AngularExtraDamping = 0.f;
+		Data.LinearTargetVelocityMultiplier = VelocityMultiplier;
+		Data.AngularTargetVelocityMultiplier = VelocityMultiplier;
 		Data.bUseSkeletalAnimation = true;
 		Data.bUseAccelerationDriveMode = true;
 		Data.bOnlyControlChildObject = true;
@@ -72,27 +75,21 @@ bool UIronboundCombatBodyComponent::InitializeBody(
 	FighterMesh = Mesh;
 	PhysicsControls = Controls;
 
-	// Current animation cache and controls, then living limits, then physics.
 	AddTickPrerequisiteComponent(Controls);
 
 	bReleased = false;
+	bParryBraceActive = false;
 
 	Controls->DestroyAllControlsAndBodyModifiers();
 
 	UpperBodyBones.Reset();
 	WeaponArmBones.Reset();
-
-	// IMPORTANT:
-	// Keep the exact names returned by Physics Control.
-	// We will modify these directly during a hit reaction instead of
-	// attempting to look up a control set by the label used at creation.
+	WeaponWorldControls.Reset();
+	WeaponParentControls.Reset();
 	ReactionWorldControls.Reset();
 	ReactionParentControls.Reset();
 
-	// The pelvis and legs retain animation/locomotion authority
-	// throughout every living reaction.
-	for (const USkeletalBodySetup* Setup :
-		Mesh->GetPhysicsAsset()->SkeletalBodySetups)
+	for (const USkeletalBodySetup* Setup : Mesh->GetPhysicsAsset()->SkeletalBodySetups)
 	{
 		if (!Setup)
 		{
@@ -101,8 +98,7 @@ bool UIronboundCombatBodyComponent::InitializeBody(
 
 		const FName Bone = Setup->BoneName;
 
-		if (Bone != "spine_01" &&
-			!Mesh->BoneIsChildOf(Bone, "spine_01"))
+		if (Bone != "spine_01" && !Mesh->BoneIsChildOf(Bone, "spine_01"))
 		{
 			continue;
 		}
@@ -128,27 +124,23 @@ bool UIronboundCombatBodyComponent::InitializeBody(
 			Modifier);
 	}
 
-	// Weapon arm stays strongly controlled so the sword does not become
-	// floppy during normal combat reactions.
-	Controls->CreateControlsFromSkeletalMesh(
-		Mesh,
-		WeaponArmBones,
-		EPhysicsControlType::WorldSpace,
-		TrackingData(
-			WeaponTrackingStrength,
-			WeaponTrackingStrength),
-		"WeaponWorld");
+	// IMPORTANT: retain the exact control names returned by Physics Control.
+	WeaponWorldControls =
+		Controls->CreateControlsFromSkeletalMesh(
+			Mesh,
+			WeaponArmBones,
+			EPhysicsControlType::WorldSpace,
+			TrackingData(WeaponTrackingStrength, WeaponTrackingStrength),
+			"WeaponWorld");
 
-	Controls->CreateControlsFromSkeletalMesh(
-		Mesh,
-		WeaponArmBones,
-		EPhysicsControlType::ParentSpace,
-		TrackingData(
-			0.f,
-			WeaponTrackingStrength),
-		"WeaponParent");
+	WeaponParentControls =
+		Controls->CreateControlsFromSkeletalMesh(
+			Mesh,
+			WeaponArmBones,
+			EPhysicsControlType::ParentSpace,
+			TrackingData(0.f, WeaponTrackingStrength),
+			"WeaponParent");
 
-	// Store the actual controls created for the reaction body.
 	ReactionWorldControls =
 		Controls->CreateControlsFromSkeletalMesh(
 			Mesh,
@@ -167,6 +159,8 @@ bool UIronboundCombatBodyComponent::InitializeBody(
 
 	return !WeaponArmBones.IsEmpty() &&
 		   !UpperBodyBones.IsEmpty() &&
+		   !WeaponWorldControls.IsEmpty() &&
+		   !WeaponParentControls.IsEmpty() &&
 		   !ReactionWorldControls.IsEmpty() &&
 		   !ReactionParentControls.IsEmpty();
 }
@@ -182,15 +176,10 @@ void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
 
 	const UPhysicsAsset* Asset = FighterMesh->GetPhysicsAsset();
 
-	for (int32 Index = 0;
-		 Index < Asset->ConstraintSetup.Num();
-		 ++Index)
+	for (int32 Index = 0; Index < Asset->ConstraintSetup.Num(); ++Index)
 	{
-		const UPhysicsConstraintTemplate* Template =
-			Asset->ConstraintSetup[Index];
-
-		FConstraintInstance* Joint =
-			FighterMesh->GetConstraintInstanceByIndex(Index);
+		const UPhysicsConstraintTemplate* Template = Asset->ConstraintSetup[Index];
+		FConstraintInstance* Joint = FighterMesh->GetConstraintInstanceByIndex(Index);
 
 		if (!Template || !Joint)
 		{
@@ -221,8 +210,6 @@ void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
 					FighterMesh,
 					Default.ConstraintBone2);
 
-			// The helper requires CHILD RELATIVE TO PARENT,
-			// never a world-space drive target.
 			Joint->WidenLimitsForDriveTarget(
 				Child.GetRelativeTransform(Parent).GetRotation(),
 				Default);
@@ -230,28 +217,100 @@ void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
 	}
 }
 
-void UIronboundCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
+void UIronboundCombatBodyComponent::UpdateWeaponDrives()
 {
-	// This is servo tuning, not a fighter skill statistic
-	// or a percentage of muscular strength.
-	WeaponTrackingStrength = FMath::Clamp(Strength, 5.f, 80.f);
-
 	if (!PhysicsControls || bReleased)
 	{
 		return;
 	}
 
-	PhysicsControls->SetControlDatasInSet(
-		"WeaponWorld",
-		TrackingData(
-			WeaponTrackingStrength,
-			WeaponTrackingStrength));
+	if (bParryBraceActive)
+	{
+		PhysicsControls->SetControlDatas(
+			WeaponWorldControls,
+			TrackingData(
+				ParryWorldLinearStrength,
+				ParryWorldAngularStrength,
+				ParryVelocityMultiplier));
 
-	PhysicsControls->SetControlDatasInSet(
-		"WeaponParent",
-		TrackingData(
-			0.f,
-			WeaponTrackingStrength));
+		PhysicsControls->SetControlDatas(
+			WeaponParentControls,
+			TrackingData(
+				0.f,
+				ParryParentAngularStrength,
+				ParryVelocityMultiplier));
+	}
+	else
+	{
+		PhysicsControls->SetControlDatas(
+			WeaponWorldControls,
+			TrackingData(
+				WeaponTrackingStrength,
+				WeaponTrackingStrength));
+
+		PhysicsControls->SetControlDatas(
+			WeaponParentControls,
+			TrackingData(
+				0.f,
+				WeaponTrackingStrength));
+	}
+}
+
+void UIronboundCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
+{
+	WeaponTrackingStrength = FMath::Clamp(Strength, 5.f, 80.f);
+
+	// Do not weaken an active parry brace. The new normal strength will be
+	// restored automatically by EndParryBrace().
+	if (!bParryBraceActive)
+	{
+		UpdateWeaponDrives();
+	}
+}
+
+void UIronboundCombatBodyComponent::BeginParryBrace()
+{
+	if (bReleased || bParryBraceActive)
+	{
+		return;
+	}
+
+	bParryBraceActive = true;
+	UpdateWeaponDrives();
+
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("ParryBrace [%s]: BEGIN world=(%.0f, %.0f) parentAngular=%.0f velocity=%.2f controls=(%d,%d)"),
+		*GetNameSafe(GetOwner()),
+		ParryWorldLinearStrength,
+		ParryWorldAngularStrength,
+		ParryParentAngularStrength,
+		ParryVelocityMultiplier,
+		WeaponWorldControls.Num(),
+		WeaponParentControls.Num());
+}
+
+void UIronboundCombatBodyComponent::EndParryBrace()
+{
+	if (!bParryBraceActive)
+	{
+		return;
+	}
+
+	bParryBraceActive = false;
+
+	if (!bReleased)
+	{
+		UpdateWeaponDrives();
+	}
+
+	UE_LOG(
+		LogTemp,
+		Log,
+		TEXT("ParryBrace [%s]: END restore=%.0f"),
+		*GetNameSafe(GetOwner()),
+		WeaponTrackingStrength);
 }
 
 void UIronboundCombatBodyComponent::UpdateDrives()
@@ -263,10 +322,6 @@ void UIronboundCombatBodyComponent::UpdateDrives()
 
 	const float Recovery = 1.f - ReactionWeight;
 
-	// IMPORTANT:
-	// Use the actual control names returned when the controls were created.
-	// The previous SetControlDatasInSet("ReactionWorld"/"ReactionParent")
-	// calls were attempting to find sets that did not exist.
 	PhysicsControls->SetControlDatas(
 		ReactionWorldControls,
 		TrackingData(
@@ -278,7 +333,7 @@ void UIronboundCombatBodyComponent::UpdateDrives()
 		TrackingData(
 			0.f,
 			FMath::Lerp(0.f, 40.f, Recovery)));
-	}
+}
 
 void UIronboundCombatBodyComponent::ApplyHitReaction(
 	UPrimitiveComponent* Weapon,
@@ -290,13 +345,11 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 	}
 
 	const auto* Focus =
-		GetOwner()->FindComponentByClass<
-			UIronboundCombatFocusComponent>();
+		GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
 
 	const auto* Attacker =
 		Weapon->GetOwner()
-			? Weapon->GetOwner()->FindComponentByClass<
-				UIronboundCombatFocusComponent>()
+			? Weapon->GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>()
 			: nullptr;
 
 	if (!Focus ||
@@ -317,8 +370,7 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 		Bone = "spine_03";
 	}
 
-	FBodyInstance* Body =
-		FighterMesh->GetBodyInstance(Bone);
+	FBodyInstance* Body = FighterMesh->GetBodyInstance(Bone);
 
 	if (!Body)
 	{
@@ -326,12 +378,16 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 	}
 
 	FVector Direction =
-		Weapon->GetPhysicsLinearVelocityAtPoint(
-			Hit.ImpactPoint);
+		Weapon->GetPhysicsLinearVelocityAtPoint(Hit.ImpactPoint);
 
 	const float Speed = Direction.Size();
 
-	UE_LOG(LogTemp, Warning, TEXT("SWORD HIT SPEED = %.1f cm/s | Reaction speed = %.1f"), Speed, FMath::Clamp(Speed * 2.0f, 60.f, MaxReactionSpeed));
+	UE_LOG(
+		LogTemp,
+		Warning,
+		TEXT("SWORD HIT SPEED = %.1f cm/s | Reaction speed = %.1f"),
+		Speed,
+		FMath::Clamp(Speed * 2.0f, 60.f, MaxReactionSpeed));
 
 	if (!Direction.Normalize())
 	{
@@ -342,21 +398,16 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 
 	if (!bReleased)
 	{
-		ReactionTimeRemaining =
-			FMath::Max(RecoveryDuration, 0.01f);
-
+		ReactionTimeRemaining = FMath::Max(RecoveryDuration, 0.01f);
 		ReactionWeight = 1.f;
-
 		++ReactionCount;
-
-		// This now genuinely softens the torso controls before
-		// the impulse is applied.
 		UpdateDrives();
 	}
 
-	// Bounded impulse at the contacted body; never launch the entire
-	// pelvis/leg chain on a normal hit.
-	const FVector Impulse = Direction * FMath::Clamp(Speed * 2.0f, 60.f, MaxReactionSpeed) * Body->GetBodyMass();
+	const FVector Impulse =
+		Direction *
+		FMath::Clamp(Speed * 2.0f, 60.f, MaxReactionSpeed) *
+		Body->GetBodyMass();
 
 	FighterMesh->AddImpulseAtLocation(
 		Impulse,
@@ -367,6 +418,7 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 void UIronboundCombatBodyComponent::ReleaseForDeath()
 {
 	bReleased = true;
+	bParryBraceActive = false;
 
 	ReactionWeight = 0.f;
 	ReactionTimeRemaining = 0.f;
@@ -384,10 +436,7 @@ void UIronboundCombatBodyComponent::TickComponent(
 	ELevelTick TickType,
 	FActorComponentTickFunction* TickFunction)
 {
-	Super::TickComponent(
-		DeltaTime,
-		TickType,
-		TickFunction);
+	Super::TickComponent(DeltaTime, TickType, TickFunction);
 
 	if (!PhysicsControls ||
 		!FighterMesh ||
@@ -405,8 +454,6 @@ void UIronboundCombatBodyComponent::TickComponent(
 				0.f,
 				ReactionTimeRemaining - DeltaTime);
 
-		// Hold compliance for the initial impact, then smoothly
-		// recover drive authority.
 		const float T =
 			FMath::Clamp(
 				ReactionTimeRemaining /
@@ -434,8 +481,7 @@ void UIronboundCombatBodyComponent::MeasureTracking()
 	}
 
 	const auto* Equipment =
-		GetOwner()->FindComponentByClass<
-			UIronboundEquipmentComponent>();
+		GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
 
 	if (!Equipment ||
 		!Equipment->bReady ||

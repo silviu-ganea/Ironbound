@@ -6,6 +6,7 @@
 
 class USkeletalMeshComponent;
 class UIronboundCombatFocusComponent;
+class UIronboundCombatBodyComponent;
 
 UENUM(BlueprintType)
 enum class EIronboundParryState : uint8
@@ -29,7 +30,6 @@ struct FIronboundParryDiagnostics
     int32 AngleRejected = 0;
     int32 AnatomyRejected = 0;
     int32 BodyRejected = 0;
-    int32 ProtectionRejected = 0;
     int32 TimingRejected = 0;
     int32 SpeedRejected = 0;
     int32 ValidCandidates = 0;
@@ -208,20 +208,6 @@ protected:
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
     float IncomingTipContactQualityWeight = 3.0f;
 
-    // Target-aware protection. A head attack must be intercepted around the
-    // head/upper torso BEFORE the incoming blade reaches that protected zone.
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Protection", meta=(ClampMin="1.0"))
-    float ProtectMarginCm = 38.f;
-
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Protection", meta=(ClampMin="1.0"))
-    float MaxProtectionRadiusCm = 52.f;
-
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Protection", meta=(ClampMin="0.0"))
-    float MinimumApproachOffsetCm = 3.f;
-
-    UPROPERTY(EditAnywhere, Category="Combat|Parry|Execution", meta=(ClampMin="5.0"))
-    float ParryGripTrackingStrength = 80.f;
-
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
     float PerceptionDelaySeconds = 0.f;
 
@@ -260,6 +246,9 @@ private:
     UPROPERTY()
     TObjectPtr<UIronboundCombatFocusComponent> CombatFocus;
 
+    UPROPERTY()
+    TObjectPtr<UIronboundCombatBodyComponent> CombatBody;
+
     TWeakObjectPtr<AActor> ObservedAttacker;
 
     bool bObservedCommittedAttack = false;
@@ -283,12 +272,6 @@ private:
 
     FTransform ExecutedHandTransform = FTransform::Identity;
     FVector ExecutedElbowPosition = FVector::ZeroVector;
-
-    bool bTrackingStiffened = false;
-    float PreviousTrackingStrength = 60.f;
-
-    // Built once for the current solve from the attacker's planned target bone.
-    mutable TArray<FVector> ProtectedPoints;
 
     void ResetParryAction();
     void InitializeExecutionPose();
