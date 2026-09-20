@@ -14,51 +14,49 @@
 
 namespace
 {
+	struct FBodyProbe
+	{
+		FName Bone;
+		float Radius;
+	};
+
+	// Conservative gameplay envelope used for both the hard timing gate and
+	// candidate clearance ranking. This is intentionally the same geometry in
+	// both paths so the solver cannot rank against a different body definition
+	// than the one used to invalidate a parry.
+	static const FBodyProbe GBodyProbes[] =
+	{
+		{ TEXT("pelvis"), 34.f },
+		{ TEXT("spine_01"), 30.f },
+		{ TEXT("spine_02"), 31.f },
+		{ TEXT("spine_03"), 30.f },
+		{ TEXT("neck_01"), 24.f },
+		{ TEXT("head"), 28.f }
+	};
+
 	float FindBodyIntersectionTime(
 		USkeletalMeshComponent* Mesh,
 		const FBladeTrajectory& Trajectory,
 		const FTransform& AttackerTransform,
-		float CurrentSourceTime)
+		float CurrentSourceTime,
+		bool& bOutAlreadyIntersected)
 	{
+		bOutAlreadyIntersected = false;
+
 		if (!Mesh)
 		{
 			return TNumericLimits<float>::Max();
 		}
 
-		struct FBodyProbe
-		{
-			FName Bone;
-			float Radius;
-		};
-
-		// Conservative gameplay envelope used only to establish
-		// the latest safe parry time.
-		static const FBodyProbe Probes[] =
-		{
-			{ TEXT("pelvis"), 34.f },
-			{ TEXT("spine_01"), 30.f },
-			{ TEXT("spine_02"), 31.f },
-			{ TEXT("spine_03"), 30.f },
-			{ TEXT("neck_01"), 24.f },
-			{ TEXT("head"), 28.f }
-		};
-
-		float FirstIntersectionTime = TNumericLimits<float>::Max();
-
 		for (const FBladeSegment& Segment : Trajectory.Segments)
 		{
-			if (Segment.TimeSeconds <= CurrentSourceTime)
-			{
-				continue;
-			}
-
 			const FVector BladeBase =
 				AttackerTransform.TransformPosition(Segment.Base);
 
 			const FVector BladeTip =
 				AttackerTransform.TransformPosition(Segment.Tip);
 
-			for (const FBodyProbe& Probe : Probes)
+			for (const FBodyProbe& Probe : GBodyProbes)
 			{
 				if (Mesh->GetBoneIndex(Probe.Bone) == INDEX_NONE)
 				{
@@ -77,17 +75,62 @@ namespace
 				if (FVector::DistSquared(BodyPoint, ClosestPoint) <=
 					FMath::Square(Probe.Radius))
 				{
-					FirstIntersectionTime =
-						FMath::Min(
-							FirstIntersectionTime,
-							Segment.TimeSeconds);
+					if (Segment.TimeSeconds <=
+						CurrentSourceTime + KINDA_SMALL_NUMBER)
+					{
+						bOutAlreadyIntersected = true;
+					}
 
-					break;
+					// Trajectory samples are ordered by source time. Returning
+					// the first hit preserves the first body intersection,
+					// including one that happened before reaction became ready.
+					return Segment.TimeSeconds;
 				}
 			}
 		}
 
-		return FirstIntersectionTime;
+		return TNumericLimits<float>::Max();
+	}
+
+	float FindMinimumBodyClearance(
+		USkeletalMeshComponent* Mesh,
+		const FVector& BladeBase,
+		const FVector& BladeTip)
+	{
+		if (!Mesh)
+		{
+			return -TNumericLimits<float>::Max();
+		}
+
+		float MinimumClearance = TNumericLimits<float>::Max();
+		bool bFoundProbe = false;
+
+		for (const FBodyProbe& Probe : GBodyProbes)
+		{
+			if (Mesh->GetBoneIndex(Probe.Bone) == INDEX_NONE)
+			{
+				continue;
+			}
+
+			bFoundProbe = true;
+			const FVector BodyPoint = Mesh->GetSocketLocation(Probe.Bone);
+			const FVector ClosestPoint =
+				FMath::ClosestPointOnSegment(
+					BodyPoint,
+					BladeBase,
+					BladeTip);
+
+			const float Clearance =
+				FMath::Sqrt(
+					FVector::DistSquared(BodyPoint, ClosestPoint)) -
+				Probe.Radius;
+
+			MinimumClearance = FMath::Min(MinimumClearance, Clearance);
+		}
+
+		return bFoundProbe
+			? MinimumClearance
+			: -TNumericLimits<float>::Max();
 	}
 }
 
@@ -704,14 +747,28 @@ bool UIronboundParryComponent::FindBestParryCandidate(
     if (!GetIncomingSourcePlaybackTime(CurrentSourceTime))
         return false;
 
+    bool bBodyAlreadyIntersected = false;
     const float BodyIntersectionTime =
         FindBodyIntersectionTime(
             FighterMesh,
             Trajectory,
             AttackerTransform,
-            CurrentSourceTime);
+            CurrentSourceTime,
+            bBodyAlreadyIntersected);
 
-    constexpr float BodySafetyMargin = 0.08f;
+    LastDiagnostics.FirstBodyIntersectionTime =
+        BodyIntersectionTime < TNumericLimits<float>::Max()
+            ? BodyIntersectionTime
+            : -1.f;
+
+    if (bBodyAlreadyIntersected)
+    {
+        LastParryEarlyExitReason =
+            TEXT("incoming blade already intersected defender body");
+        ++LastDiagnostics.TimingRejected;
+        LogDiagnosticsOnce();
+        return false;
+    }
 
     const int32 IncomingContactCount = FMath::Max(2, IncomingBladeContactSamples);
     const int32 BladeFractionCount = FMath::Max(2, DefenderBladeFractionSamples);
@@ -734,7 +791,7 @@ bool UIronboundParryComponent::FindBestParryCandidate(
         // Never accept a parry after the incoming blade has already
         // entered the defender's torso/head envelope.
         if (Segment.TimeSeconds >=
-            BodyIntersectionTime - BodySafetyMargin)
+            BodyIntersectionTime - BodySafetyMarginSeconds)
         {
             ++LastDiagnostics.TimingRejected;
             continue;
@@ -747,6 +804,12 @@ bool UIronboundParryComponent::FindBestParryCandidate(
         const FVector IncomingDir =
             (IncomingTip - IncomingBase).GetSafeNormal();
         if (IncomingDir.IsNearlyZero()) continue;
+
+        const float BodyClearance =
+            FindMinimumBodyClearance(
+                FighterMesh,
+                IncomingBase,
+                IncomingTip);
 
         FVector BasisA = FVector::CrossProduct(IncomingDir, FVector::UpVector);
         if (BasisA.IsNearlyZero())
@@ -821,8 +884,20 @@ bool UIronboundParryComponent::FindBestParryCandidate(
                                 0.f,
                                 1.f);
 
-                        // Prefer candidates with more time remaining before body impact.
-                        Candidate.Quality += 2.f * BodyTimingMargin;
+                        // Time margin remains a hard-safety preference, while
+                        // spatial clearance prefers a clash farther from the
+                        // defender's body among otherwise good candidates.
+                        const float BodyClearanceQuality =
+                            FMath::Clamp(
+                                BodyClearance /
+                                    FMath::Max(BodyClearancePreferenceDistance, 1.f),
+                                0.f,
+                                1.f);
+
+                        Candidate.BodyClearance = BodyClearance;
+                        Candidate.Quality +=
+                            2.f * BodyTimingMargin +
+                            BodyClearanceQualityWeight * BodyClearanceQuality;
 
                         if (Candidate.Quality > BestQuality)
                         {
@@ -835,6 +910,8 @@ bool UIronboundParryComponent::FindBestParryCandidate(
                                 Candidate.RequiredHandSpeed;
                             LastDiagnostics.BestRequiredBladeAngularSpeed =
                                 Candidate.RequiredBladeAngularSpeed;
+                            LastDiagnostics.BestBodyClearance =
+                                Candidate.BodyClearance;
                             LastDiagnostics.BestQuality =
                                 Candidate.Quality;
                         }

@@ -34,6 +34,8 @@ struct FIronboundParryDiagnostics
     int32 SpeedRejected = 0;
     int32 ValidCandidates = 0;
 
+    float FirstBodyIntersectionTime = -1.f;
+    float BestBodyClearance = -1.f;
     float BestTimeUntilContact = -1.f;
     float BestRequiredHandSpeed = -1.f;
     float BestRequiredBladeAngularSpeed = -1.f;
@@ -64,6 +66,7 @@ struct FIronboundParryCandidate
     float ElbowAngleDegrees = 0.f;
     float RequiredHandSpeed = 0.f;
     float RequiredBladeAngularSpeed = 0.f;
+    float BodyClearance = -1.f;
     float Quality = -TNumericLimits<float>::Max();
 
     bool bValid = false;
@@ -207,6 +210,17 @@ protected:
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver")
     float IncomingTipContactQualityWeight = 3.0f;
+
+    // Prefer a clash with more clearance from the defender's body after
+    // hard-validity checks have passed.
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="0.0"))
+    float BodyClearanceQualityWeight = 1.5f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Solver", meta=(ClampMin="1.0"))
+    float BodyClearancePreferenceDistance = 75.f;
+
+    UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
+    float BodySafetyMarginSeconds = 0.08f;
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
     float PerceptionDelaySeconds = 0.f;

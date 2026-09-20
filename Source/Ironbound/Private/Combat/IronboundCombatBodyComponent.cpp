@@ -218,24 +218,25 @@ void UIronboundCombatBodyComponent::UpdateWeaponDrives()
 
 	if (bParryBraceActive)
 	{
-		// Control Rig/IK owns the intentional arm pose. The weapon is constrained
-		// to hand_r, so world-space and parent-space drives on the same bodies
-		// would create two competing pose authorities and twist the wrist.
-		// During the brace, parent-space controls provide resistance relative to
-		// the physical arm chain without independently steering the arm in world
-		// space.
+		// The parry solver selects the sword contact and derives the hand/elbow
+		// pose. Control Rig/IK is the only intentional arm-pose authority. The
+		// constrained weapon follows hand_r, while this single world-space
+		// Physics Control only makes the simulated arm track that authored pose.
+		// The parent-space control is disabled here; driving the same weapon arm
+		// through both spaces was a second wrist authority and could twist the
+		// hand into the fighter.
 		PhysicsControls->SetControlDatas(
 			WeaponWorldControls,
 			TrackingData(
-				0.f,
-				0.f,
+				ParryWorldLinearStrength,
+				ParryWorldAngularStrength,
 				ParryVelocityMultiplier));
 
 		PhysicsControls->SetControlDatas(
 			WeaponParentControls,
 			TrackingData(
 				0.f,
-				ParryParentAngularStrength,
+				0.f,
 				ParryVelocityMultiplier));
 	}
 	else
