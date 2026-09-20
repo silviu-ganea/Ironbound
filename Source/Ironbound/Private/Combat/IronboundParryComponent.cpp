@@ -12,6 +12,85 @@
 #include "Components/StaticMeshComponent.h"
 #include "DrawDebugHelpers.h"
 
+namespace
+{
+	float FindBodyIntersectionTime(
+		USkeletalMeshComponent* Mesh,
+		const FBladeTrajectory& Trajectory,
+		const FTransform& AttackerTransform,
+		float CurrentSourceTime)
+	{
+		if (!Mesh)
+		{
+			return TNumericLimits<float>::Max();
+		}
+
+		struct FBodyProbe
+		{
+			FName Bone;
+			float Radius;
+		};
+
+		// Conservative gameplay envelope used only to establish
+		// the latest safe parry time.
+		static const FBodyProbe Probes[] =
+		{
+			{ TEXT("pelvis"), 34.f },
+			{ TEXT("spine_01"), 30.f },
+			{ TEXT("spine_02"), 31.f },
+			{ TEXT("spine_03"), 30.f },
+			{ TEXT("neck_01"), 24.f },
+			{ TEXT("head"), 28.f }
+		};
+
+		float FirstIntersectionTime = TNumericLimits<float>::Max();
+
+		for (const FBladeSegment& Segment : Trajectory.Segments)
+		{
+			if (Segment.TimeSeconds <= CurrentSourceTime)
+			{
+				continue;
+			}
+
+			const FVector BladeBase =
+				AttackerTransform.TransformPosition(Segment.Base);
+
+			const FVector BladeTip =
+				AttackerTransform.TransformPosition(Segment.Tip);
+
+			for (const FBodyProbe& Probe : Probes)
+			{
+				if (Mesh->GetBoneIndex(Probe.Bone) == INDEX_NONE)
+				{
+					continue;
+				}
+
+				const FVector BodyPoint =
+					Mesh->GetSocketLocation(Probe.Bone);
+
+				const FVector ClosestPoint =
+					FMath::ClosestPointOnSegment(
+						BodyPoint,
+						BladeBase,
+						BladeTip);
+
+				if (FVector::DistSquared(BodyPoint, ClosestPoint) <=
+					FMath::Square(Probe.Radius))
+				{
+					FirstIntersectionTime =
+						FMath::Min(
+							FirstIntersectionTime,
+							Segment.TimeSeconds);
+
+					break;
+				}
+			}
+		}
+
+		return FirstIntersectionTime;
+	}
+}
+
 UIronboundParryComponent::UIronboundParryComponent()
 {
     PrimaryComponentTick.bCanEverTick = true;
@@ -625,6 +704,15 @@ bool UIronboundParryComponent::FindBestParryCandidate(
     if (!GetIncomingSourcePlaybackTime(CurrentSourceTime))
         return false;
 
+    const float BodyIntersectionTime =
+        FindBodyIntersectionTime(
+            FighterMesh,
+            Trajectory,
+            AttackerTransform,
+            CurrentSourceTime);
+
+    constexpr float BodySafetyMargin = 0.08f;
+
     const int32 IncomingContactCount = FMath::Max(2, IncomingBladeContactSamples);
     const int32 BladeFractionCount = FMath::Max(2, DefenderBladeFractionSamples);
     const int32 OrientationCount = FMath::Max(8, DefenseOrientationSamples);
@@ -640,6 +728,15 @@ bool UIronboundParryComponent::FindBestParryCandidate(
         if (TimeUntil < MinimumTimeToContact)
         {
             ++LastDiagnostics.ExpiredSegments;
+            continue;
+        }
+
+        // Never accept a parry after the incoming blade has already
+        // entered the defender's torso/head envelope.
+        if (Segment.TimeSeconds >=
+            BodyIntersectionTime - BodySafetyMargin)
+        {
+            ++LastDiagnostics.TimingRejected;
             continue;
         }
 
@@ -717,6 +814,15 @@ bool UIronboundParryComponent::FindBestParryCandidate(
                             BladeLength, CurrentWeaponTransform, CurrentDefenseBase,
                             CurrentDefenseDirection, Candidate))
                             continue;
+
+                        const float BodyTimingMargin =
+                            FMath::Clamp(
+                                (BodyIntersectionTime - Segment.TimeSeconds) / 0.75f,
+                                0.f,
+                                1.f);
+
+                        // Prefer candidates with more time remaining before body impact.
+                        Candidate.Quality += 2.f * BodyTimingMargin;
 
                         if (Candidate.Quality > BestQuality)
                         {

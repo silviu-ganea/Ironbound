@@ -167,9 +167,7 @@ bool UIronboundCombatBodyComponent::InitializeBody(
 
 void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
 {
-	if (!FighterMesh ||
-		!PhysicsControls ||
-		!FighterMesh->GetPhysicsAsset())
+	if (!FighterMesh || !PhysicsControls || !FighterMesh->GetPhysicsAsset())
 	{
 		return;
 	}
@@ -200,19 +198,13 @@ void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
 		}
 		else
 		{
-			const FTransform Child =
-				PhysicsControls->GetCachedBoneTransform(
-					FighterMesh,
-					Default.ConstraintBone1);
-
-			const FTransform Parent =
-				PhysicsControls->GetCachedBoneTransform(
-					FighterMesh,
-					Default.ConstraintBone2);
+			const FTransform Child = PhysicsControls->GetCachedBoneTransform(
+				FighterMesh, Default.ConstraintBone1);
+			const FTransform Parent = PhysicsControls->GetCachedBoneTransform(
+				FighterMesh, Default.ConstraintBone2);
 
 			Joint->WidenLimitsForDriveTarget(
-				Child.GetRelativeTransform(Parent).GetRotation(),
-				Default);
+				Child.GetRelativeTransform(Parent).GetRotation(), Default);
 		}
 	}
 }
@@ -226,11 +218,17 @@ void UIronboundCombatBodyComponent::UpdateWeaponDrives()
 
 	if (bParryBraceActive)
 	{
+		// Control Rig/IK owns the intentional arm pose. The weapon is constrained
+		// to hand_r, so world-space and parent-space drives on the same bodies
+		// would create two competing pose authorities and twist the wrist.
+		// During the brace, parent-space controls provide resistance relative to
+		// the physical arm chain without independently steering the arm in world
+		// space.
 		PhysicsControls->SetControlDatas(
 			WeaponWorldControls,
 			TrackingData(
-				ParryWorldLinearStrength,
-				ParryWorldAngularStrength,
+				0.f,
+				0.f,
 				ParryVelocityMultiplier));
 
 		PhysicsControls->SetControlDatas(
@@ -244,15 +242,11 @@ void UIronboundCombatBodyComponent::UpdateWeaponDrives()
 	{
 		PhysicsControls->SetControlDatas(
 			WeaponWorldControls,
-			TrackingData(
-				WeaponTrackingStrength,
-				WeaponTrackingStrength));
+			TrackingData(WeaponTrackingStrength, WeaponTrackingStrength));
 
 		PhysicsControls->SetControlDatas(
 			WeaponParentControls,
-			TrackingData(
-				0.f,
-				WeaponTrackingStrength));
+			TrackingData(0.f, WeaponTrackingStrength));
 	}
 }
 
@@ -260,8 +254,6 @@ void UIronboundCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
 {
 	WeaponTrackingStrength = FMath::Clamp(Strength, 5.f, 80.f);
 
-	// Do not weaken an active parry brace. The new normal strength will be
-	// restored automatically by EndParryBrace().
 	if (!bParryBraceActive)
 	{
 		UpdateWeaponDrives();
@@ -281,10 +273,8 @@ void UIronboundCombatBodyComponent::BeginParryBrace()
 	UE_LOG(
 		LogTemp,
 		Log,
-		TEXT("ParryBrace [%s]: BEGIN world=(%.0f, %.0f) parentAngular=%.0f velocity=%.2f controls=(%d,%d)"),
+		TEXT("ParryBrace [%s]: BEGIN parentAngular=%.0f velocity=%.2f controls=(%d,%d)"),
 		*GetNameSafe(GetOwner()),
-		ParryWorldLinearStrength,
-		ParryWorldAngularStrength,
 		ParryParentAngularStrength,
 		ParryVelocityMultiplier,
 		WeaponWorldControls.Num(),
@@ -344,42 +334,30 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 		return;
 	}
 
-	const auto* Focus =
-		GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+	const auto* Focus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+	const auto* Attacker = Weapon->GetOwner()
+		? Weapon->GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>()
+		: nullptr;
 
-	const auto* Attacker =
-		Weapon->GetOwner()
-			? Weapon->GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>()
-			: nullptr;
-
-	if (!Focus ||
-		!Attacker ||
-		Focus->Team <= 0 ||
-		Attacker->Team <= 0 ||
+	if (!Focus || !Attacker || Focus->Team <= 0 || Attacker->Team <= 0 ||
 		Focus->Team == Attacker->Team)
 	{
 		return;
 	}
 
 	FName Bone = Hit.BoneName;
-
-	if (!bReleased &&
-		!UpperBodyBones.Contains(Bone) &&
-		!WeaponArmBones.Contains(Bone))
+	if (!bReleased && !UpperBodyBones.Contains(Bone) && !WeaponArmBones.Contains(Bone))
 	{
 		Bone = "spine_03";
 	}
 
 	FBodyInstance* Body = FighterMesh->GetBodyInstance(Bone);
-
 	if (!Body)
 	{
 		return;
 	}
 
-	FVector Direction =
-		Weapon->GetPhysicsLinearVelocityAtPoint(Hit.ImpactPoint);
-
+	FVector Direction = Weapon->GetPhysicsLinearVelocityAtPoint(Hit.ImpactPoint);
 	const float Speed = Direction.Size();
 
 	UE_LOG(
@@ -391,9 +369,7 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 
 	if (!Direction.Normalize())
 	{
-		Direction =
-			(GetOwner()->GetActorLocation() -
-			 Weapon->GetComponentLocation()).GetSafeNormal();
+		Direction = (GetOwner()->GetActorLocation() - Weapon->GetComponentLocation()).GetSafeNormal();
 	}
 
 	if (!bReleased)
@@ -405,21 +381,15 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 	}
 
 	const FVector Impulse =
-		Direction *
-		FMath::Clamp(Speed * 2.0f, 60.f, MaxReactionSpeed) *
-		Body->GetBodyMass();
+		Direction * FMath::Clamp(Speed * 2.0f, 60.f, MaxReactionSpeed) * Body->GetBodyMass();
 
-	FighterMesh->AddImpulseAtLocation(
-		Impulse,
-		Hit.ImpactPoint,
-		Bone);
+	FighterMesh->AddImpulseAtLocation(Impulse, Hit.ImpactPoint, Bone);
 }
 
 void UIronboundCombatBodyComponent::ReleaseForDeath()
 {
 	bReleased = true;
 	bParryBraceActive = false;
-
 	ReactionWeight = 0.f;
 	ReactionTimeRemaining = 0.f;
 
@@ -438,9 +408,7 @@ void UIronboundCombatBodyComponent::TickComponent(
 {
 	Super::TickComponent(DeltaTime, TickType, TickFunction);
 
-	if (!PhysicsControls ||
-		!FighterMesh ||
-		bReleased)
+	if (!PhysicsControls || !FighterMesh || bReleased)
 	{
 		return;
 	}
@@ -449,87 +417,46 @@ void UIronboundCombatBodyComponent::TickComponent(
 
 	if (ReactionTimeRemaining > 0.f)
 	{
-		ReactionTimeRemaining =
-			FMath::Max(
-				0.f,
-				ReactionTimeRemaining - DeltaTime);
+		ReactionTimeRemaining = FMath::Max(0.f, ReactionTimeRemaining - DeltaTime);
 
-		const float T =
-			FMath::Clamp(
-				ReactionTimeRemaining /
-					FMath::Max(RecoveryDuration, 0.01f),
-				0.f,
-				1.f);
+		const float T = FMath::Clamp(
+			ReactionTimeRemaining / FMath::Max(RecoveryDuration, 0.01f), 0.f, 1.f);
 
-		ReactionWeight =
-			FMath::SmoothStep(
-				0.f,
-				0.8f,
-				T);
-
+		ReactionWeight = FMath::SmoothStep(0.f, 0.8f, T);
 		UpdateDrives();
 	}
 }
 
 void UIronboundCombatBodyComponent::MeasureTracking()
 {
-	if (!PhysicsControls ||
-		!FighterMesh ||
-		bReleased)
+	if (!PhysicsControls || !FighterMesh || bReleased)
 	{
 		return;
 	}
 
-	const auto* Equipment =
-		GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
-
-	if (!Equipment ||
-		!Equipment->bReady ||
-		!Equipment->Definition ||
-		!Equipment->GetWeapon())
+	const auto* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+	if (!Equipment || !Equipment->bReady || !Equipment->Definition || !Equipment->GetWeapon())
 	{
 		return;
 	}
 
-	const FTransform AnimatedHand =
-		PhysicsControls->GetCachedBoneTransform(
-			FighterMesh,
-			Equipment->Definition->HandBone);
+	const FTransform AnimatedHand = PhysicsControls->GetCachedBoneTransform(
+		FighterMesh, Equipment->Definition->HandBone);
+	const FTransform ActualHand = FighterMesh->GetSocketTransform(Equipment->Definition->HandBone);
 
-	const FTransform ActualHand =
-		FighterMesh->GetSocketTransform(
-			Equipment->Definition->HandBone);
-
-	HandTrackingError =
-		FVector::Distance(
-			AnimatedHand.GetLocation(),
-			ActualHand.GetLocation());
-
-	HandAngularTrackingError =
-		FMath::RadiansToDegrees(
-			AnimatedHand.GetRotation().AngularDistance(
-				ActualHand.GetRotation()));
+	HandTrackingError = FVector::Distance(AnimatedHand.GetLocation(), ActualHand.GetLocation());
+	HandAngularTrackingError = FMath::RadiansToDegrees(
+		AnimatedHand.GetRotation().AngularDistance(ActualHand.GetRotation()));
 
 	const FVector IntendedTip =
-		(Equipment->Definition->WeaponToHand * AnimatedHand)
-			.TransformPosition(
-				Equipment->Definition->BladeTip);
+		(Equipment->Definition->WeaponToHand * AnimatedHand).TransformPosition(
+			Equipment->Definition->BladeTip);
+	const FVector ActualTip = Equipment->GetWeapon()->GetComponentTransform().TransformPosition(
+		Equipment->Definition->BladeTip);
 
-	const FVector ActualTip =
-		Equipment->GetWeapon()
-			->GetComponentTransform()
-			.TransformPosition(
-				Equipment->Definition->BladeTip);
-
-	WeaponTipTrackingError =
-		FVector::Distance(
-			IntendedTip,
-			ActualTip);
-
-	GripTipError =
-		FVector::Distance(
-			(Equipment->Definition->WeaponToHand * ActualHand)
-				.TransformPosition(
-					Equipment->Definition->BladeTip),
-			ActualTip);
+	WeaponTipTrackingError = FVector::Distance(IntendedTip, ActualTip);
+	GripTipError = FVector::Distance(
+		(Equipment->Definition->WeaponToHand * ActualHand).TransformPosition(
+			Equipment->Definition->BladeTip),
+		ActualTip);
 }

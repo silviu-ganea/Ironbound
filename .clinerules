@@ -1,0 +1,40 @@
+# Ironbound Agent Instructions
+
+This is an Unreal Engine 5.8.2 project.
+
+## Unreal Engine MCP
+
+A live Unreal Engine MCP server is available in Cline as `unreal-mcp`.
+
+Use it whenever a task requires information that cannot be reliably determined from source files alone, especially:
+- Blueprints and Blueprint graphs
+- Animation Blueprints
+- Animation Montages and animation assets
+- Data Tables
+- StateTrees and Behavior Trees
+- components and Blueprint defaults
+- level actors and editor state
+- asset configuration
+
+The Unreal MCP endpoint includes VibeUE capabilities.
+
+IMPORTANT:
+- Use `list_toolsets` to discover the available Unreal/VibeUE toolsets when needed.
+- Use the appropriate toolset to inspect the actual Unreal asset rather than guessing its configuration from C++.
+- Before proposing changes involving a Blueprint or Unreal asset, inspect its current state through Unreal MCP when relevant.
+- Do not assume something cannot be inspected just because it is not visible in the source repository; check the Unreal MCP toolsets first.
+- Prefer targeted MCP inspection instead of dumping large amounts of irrelevant Unreal data into context.
+
+## C++
+
+Read the existing Ironbound code before making architectural changes.
+Work with the existing combat architecture rather than creating parallel systems unnecessarily.
+
+The project target is:
+IronboundEditor Win64 Development
+
+Treat UnrealBuildTool/compiler output as authoritative for C++ compilation.
+
+Read .clinerules and COMBAT_ARCHITECTURE.md first. Use targeted source/MCP inspection only when required. Keep responses concise and do not restate code or architecture I didn't ask for. Do not modify anything yet. Tell me when you're ready for the current task.
+
+The MD files are not up to date right now

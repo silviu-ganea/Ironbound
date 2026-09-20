@@ -1,0 +1,9 @@
+{
+    "configurations": [
+        {
+            "name": "UnrealBuildTool",
+            "configurationProvider": "skyboxlabs.unrealengine-tools"
+        }
+    ],
+    "version": 4
+}
