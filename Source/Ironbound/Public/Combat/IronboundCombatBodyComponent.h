@@ -47,6 +47,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Parry Brace", meta=(ClampMin="0.0"))
 	float ParryVelocityMultiplier = 0.4f;
 
+	/**
+	 * Angular spring applied to the simulated sword at the hand during a parry.
+	 * The sword remains fully simulated; this is grip stiffness, not kinematic locking.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Parry Brace|Grip", meta=(ClampMin="0.0"))
+	float ParryGripAngularStiffness = 150000.f;
+
+	/** Damping for the parry grip angular spring. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Parry Brace|Grip", meta=(ClampMin="0.0"))
+	float ParryGripAngularDamping = 775.f;
+
+	/**
+	 * Maximum grip correction torque.
+	 * Zero means unlimited in the Chaos constraint drive, so use a finite value
+	 * if you want sufficiently hard impacts to overpower the grip.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Parry Brace|Grip", meta=(ClampMin="0.0"))
+	float ParryGripMaxTorque = 500000.f;
+
 	/** Accommodate authored poses within living joint limits; restore the asset's limits on death. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Tracking")
 	bool bFitJointLimitsToAnimation = true;
@@ -77,6 +96,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
 	bool InitializeBody(USkeletalMeshComponent* Mesh, UPhysicsControlComponent* Controls);
+
+	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
+	bool BindExistingBody(USkeletalMeshComponent* Mesh, UPhysicsControlComponent* Controls);
 
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
 	void SetWeaponTrackingStrength(float Strength);
@@ -126,4 +148,5 @@ private:
 	void UpdateWeaponDrives();
 	void UpdateDrives();
 	void UpdateJointLimits(bool bRestore);
+	void SetParryGripDrive(bool bEnabled);
 };
