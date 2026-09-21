@@ -39,6 +39,14 @@ namespace
     OutDistance = FVector::Distance(CA, CB);
     return FMath::RadiansToDegrees(FMath::Acos(AbsDot));
 }
+struct FActualParrySample
+{
+    float PlannedCross = 0.f;
+    float ClosestDistance = TNumericLimits<float>::Max();
+    float CrossAtClosest = -1.f;
+    bool bTracking = false;
+};
+TMap<const UIronboundParryComponent*, FActualParrySample> GActualParrySamples;
 struct FBodyProbe
     {
         FName Bone;
@@ -461,10 +469,32 @@ void UIronboundParryComponent::TickComponent(
     if (bHasActiveParryCandidate)
     {
         UpdateExecutionPose(DeltaTime);
+        FActualParrySample& Sample = GActualParrySamples.FindOrAdd(this);
+        if (!Sample.bTracking)
+        {
+            Sample = FActualParrySample();
+            Sample.bTracking = true;
+            Sample.PlannedCross = ActiveParryCandidate.IntersectionAngleDegrees;
+        }
         float ActualBladeDistance = 0.f;
         const float ActualCross = GetActualBladeCrossing(GetOwner(), ObservedAttacker.Get(), ActualBladeDistance);
-        if (ActualCross >= 0.f && ActualBladeDistance <= 3.f)
-            UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedCross=%.0f actualCross=%.1f bladeDistance=%.1fcm"), *GetNameSafe(GetOwner()), ActiveParryCandidate.IntersectionAngleDegrees, ActualCross, ActualBladeDistance);
+        if (ActualCross >= 0.f && ActualBladeDistance < Sample.ClosestDistance)
+        {
+            Sample.ClosestDistance = ActualBladeDistance;
+            Sample.CrossAtClosest = ActualCross;
+        }
+    }
+    else if (FActualParrySample* Sample = GActualParrySamples.Find(this); Sample && Sample->bTracking)
+    {
+        if (Sample->CrossAtClosest >= 0.f)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedCross=%.0f actualCrossAtClosest=%.1f closest=%.1fcm"), *GetNameSafe(GetOwner()), Sample->PlannedCross, Sample->CrossAtClosest, Sample->ClosestDistance);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedCross=%.0f actualCrossAtClosest=N/A closest=N/A"), *GetNameSafe(GetOwner()), Sample->PlannedCross);
+        }
+        GActualParrySamples.Remove(this);
     }
     if (bDrawParryDebug)
     {
@@ -615,17 +645,8 @@ bool UIronboundParryComponent::EvaluateCandidate(
     FIronboundParryCandidate& Out) const
 {
     const FVector DefenseDir = DefenseDirection.GetSafeNormal();
-    if (IncomingDirection.IsNearlyZero() || DefenseDir.IsNearlyZero()) return false;
-    const float AbsDot = FMath::Clamp(
-        FMath::Abs(FVector::DotProduct(IncomingDirection, DefenseDir)), 0.f, 1.f);
-    const float Crossing = FMath::RadiansToDegrees(FMath::Acos(AbsDot));
-    // Never trade tactical crossing angle for comfort.
-    constexpr float HardMinimumCrossingAngleDegrees = 80.f;
-    if (Crossing < FMath::Max(MinimumIntersectionAngleDegrees, HardMinimumCrossingAngleDegrees))
-    {
-        ++LastDiagnostics.AngleRejected;
-        return false;
-    }
+    const FVector PlannedIncomingDir = (IncomingTipWorld - IncomingBaseWorld).GetSafeNormal();
+    if (PlannedIncomingDir.IsNearlyZero() || DefenseDir.IsNearlyZero()) return false;
     // Free DOF #1: slide the defender sword along its own blade axis.
     // DefenderBladeFraction is already sampled by FindBestParryCandidate.
     const FVector CandidateBase = IncomingContactWorld - DefenseDir * (BladeLength * DefenderBladeFraction);
@@ -700,6 +721,20 @@ bool UIronboundParryComponent::EvaluateCandidate(
     const FTransform& WeaponTransform = BestWeaponTransform;
     const FTransform& HandTransform = BestHandTransform;
     const FVector Hand = BestHand;
+    // Crossing is defined from the exact two planned blade lines that debug draws:
+    // red = IncomingBaseWorld->IncomingTipWorld, cyan = transformed defender BladeBase->BladeTip.
+    const FVector ExactDefenseBase = WeaponTransform.TransformPosition(Equipment->Definition->BladeBase);
+    const FVector ExactDefenseTip = WeaponTransform.TransformPosition(Equipment->Definition->BladeTip);
+    const FVector ExactDefenseDir = (ExactDefenseTip - ExactDefenseBase).GetSafeNormal();
+    if (ExactDefenseDir.IsNearlyZero()) return false;
+    const float ExactAbsDot = FMath::Clamp(FMath::Abs(FVector::DotProduct(PlannedIncomingDir, ExactDefenseDir)), 0.f, 1.f);
+    const float Crossing = FMath::RadiansToDegrees(FMath::Acos(ExactAbsDot));
+    constexpr float HardMinimumCrossingAngleDegrees = 80.f;
+    if (Crossing < FMath::Max(MinimumIntersectionAngleDegrees, HardMinimumCrossingAngleDegrees))
+    {
+        ++LastDiagnostics.AngleRejected;
+        return false;
+    }
     const float TimeUntilContact = GetTimeUntilIncomingSample(IncomingTime);
     if (TimeUntilContact < MinimumTimeToContact)
     {
@@ -744,8 +779,8 @@ bool UIronboundParryComponent::EvaluateCandidate(
     Out.ContactPoint = IncomingContactWorld;
     Out.IncomingBase = IncomingBaseWorld;
     Out.IncomingTip = IncomingTipWorld;
-    Out.DefenseBase = CandidateBase;
-    Out.DefenseTip = CandidateTip;
+    Out.DefenseBase = ExactDefenseBase;
+    Out.DefenseTip = ExactDefenseTip;
     Out.RequiredWeaponTransform = WeaponTransform;
     Out.RequiredHandTransform = HandTransform;
     Out.RequiredHandPosition = Hand;
@@ -872,7 +907,8 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
                 for (int32 CrossingIndex = 0; CrossingIndex < CrossingCount; ++CrossingIndex)
                 {
                     const float CrossingAlpha = float(CrossingIndex) / float(CrossingCount - 1);
-                    const float CrossingDeg = FMath::Lerp(MinimumIntersectionAngleDegrees, 90.f, CrossingAlpha);
+                    constexpr float HardMinimumCrossingAngleDegrees = 80.f;
+                    const float CrossingDeg = FMath::Lerp(FMath::Max(MinimumIntersectionAngleDegrees, HardMinimumCrossingAngleDegrees), 90.f, CrossingAlpha);
                     const float CrossingRad = FMath::DegreesToRadians(CrossingDeg);
                     for (int32 OrientationIndex = 0; OrientationIndex < OrientationCount; ++OrientationIndex)
                     {
