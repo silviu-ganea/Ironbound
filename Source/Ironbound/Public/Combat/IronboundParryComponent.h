@@ -457,7 +457,11 @@ protected:
 
     UPROPERTY(EditAnywhere, Category="Combat|Parry|Timing", meta=(ClampMin="0.0"))
 
-    float BodySafetyMarginSeconds = 0.08f;
+    // One 60 Hz trajectory sample. This is only a "do not start a parry once
+    // the blade is effectively on you" guard; the real lead-time floor is
+    // MinimumTimeToContact. At 0.08 s it also removed the ~5 samples nearest
+    // impact, which are the ones that are actually inside arm reach.
+    float BodySafetyMarginSeconds = 0.02f;
 
 
 

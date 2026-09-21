@@ -96,6 +96,11 @@ public:
 		return Weapon;
 	}
 
+	UPhysicsConstraintComponent* GetConstraint() const
+	{
+		return Constraint;
+	}
+
 private:
 	UPROPERTY(Transient)
 	TObjectPtr<USkeletalMeshComponent> FighterMesh;

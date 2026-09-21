@@ -14,6 +14,22 @@
 #include "Math/UnrealMathUtility.h"
 namespace
 {
+struct FParryRejectedAnatomyDiagnostic
+{
+    bool bSet = false;
+    float ReachError = TNumericLimits<float>::Max();
+    float SweepCross = -1.f;
+    float DefenderBladeFraction = -1.f;
+    float AxialRollDegrees = -1.f;
+    float ShoulderHandDistance = -1.f;
+    float MinReach = -1.f;
+    float MaxReach = -1.f;
+    float GeometricFreedom = 0.f;
+    float WristDeviationDegrees = -1.f;
+    FString Reason;
+};
+TMap<const UIronboundParryComponent*, FParryRejectedAnatomyDiagnostic> GRejectedAnatomyDiagnostics;
+
     float GetActualBladeCrossing(AActor* A, AActor* B, float& OutDistance)
 {
     OutDistance = TNumericLimits<float>::Max();
@@ -39,14 +55,6 @@ namespace
     OutDistance = FVector::Distance(CA, CB);
     return FMath::RadiansToDegrees(FMath::Acos(AbsDot));
 }
-struct FActualParrySample
-{
-    float PlannedCross = 0.f;
-    float ClosestDistance = TNumericLimits<float>::Max();
-    float CrossAtClosest = -1.f;
-    bool bTracking = false;
-};
-TMap<const UIronboundParryComponent*, FActualParrySample> GActualParrySamples;
 struct FBodyProbe
     {
         FName Bone;
@@ -56,6 +64,16 @@ struct FBodyProbe
     // candidate clearance ranking. This is intentionally the same geometry in
     // both paths so the solver cannot rank against a different body definition
     // than the one used to invalidate a parry.
+    // The probe radii below are a *preference* surface: they describe how far
+    // the solver would LIKE the defensive blade to stay from the torso (34 cm
+    // around the pelvis is far wider than the actual body). They must not
+    // double as the hard "the incoming blade has already entered the body"
+    // test, because then the gate fires while the blade is still ~25 cm away
+    // from the torso - which deletes the last two thirds of the swing, and
+    // with them every intercept that is both sweep-perpendicular and inside
+    // arm reach. The hard gate answers one question only: has the blade
+    // actually reached the body?
+    static constexpr float GBodyIntersectionRadiusScale = 0.35f;
     static const FBodyProbe GBodyProbes[] =
     {
         { TEXT("pelvis"), 34.f },
@@ -93,7 +111,7 @@ struct FBodyProbe
                         BladeBase,
                         BladeTip);
                 if (FVector::DistSquared(BodyPoint, ClosestPoint) <=
-                    FMath::Square(Probe.Radius))
+                    FMath::Square(Probe.Radius * GBodyIntersectionRadiusScale))
                 {
                     if (Segment.TimeSeconds <=
                         CurrentSourceTime + KINDA_SMALL_NUMBER)
@@ -469,32 +487,10 @@ void UIronboundParryComponent::TickComponent(
     if (bHasActiveParryCandidate)
     {
         UpdateExecutionPose(DeltaTime);
-        FActualParrySample& Sample = GActualParrySamples.FindOrAdd(this);
-        if (!Sample.bTracking)
-        {
-            Sample = FActualParrySample();
-            Sample.bTracking = true;
-            Sample.PlannedCross = ActiveParryCandidate.IntersectionAngleDegrees;
-        }
         float ActualBladeDistance = 0.f;
         const float ActualCross = GetActualBladeCrossing(GetOwner(), ObservedAttacker.Get(), ActualBladeDistance);
-        if (ActualCross >= 0.f && ActualBladeDistance < Sample.ClosestDistance)
-        {
-            Sample.ClosestDistance = ActualBladeDistance;
-            Sample.CrossAtClosest = ActualCross;
-        }
-    }
-    else if (FActualParrySample* Sample = GActualParrySamples.Find(this); Sample && Sample->bTracking)
-    {
-        if (Sample->CrossAtClosest >= 0.f)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedCross=%.0f actualCrossAtClosest=%.1f closest=%.1fcm"), *GetNameSafe(GetOwner()), Sample->PlannedCross, Sample->CrossAtClosest, Sample->ClosestDistance);
-        }
-        else
-        {
-            UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedCross=%.0f actualCrossAtClosest=N/A closest=N/A"), *GetNameSafe(GetOwner()), Sample->PlannedCross);
-        }
-        GActualParrySamples.Remove(this);
+        if (ActualCross >= 0.f && ActualBladeDistance <= 3.f)
+            UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedSweepCross=%.0f actualBladeCross=%.1f bladeDistance=%.1fcm"), *GetNameSafe(GetOwner()), ActiveParryCandidate.IntersectionAngleDegrees, ActualCross, ActualBladeDistance);
     }
     if (bDrawParryDebug)
     {
@@ -645,8 +641,20 @@ bool UIronboundParryComponent::EvaluateCandidate(
     FIronboundParryCandidate& Out) const
 {
     const FVector DefenseDir = DefenseDirection.GetSafeNormal();
-    const FVector PlannedIncomingDir = (IncomingTipWorld - IncomingBaseWorld).GetSafeNormal();
-    if (PlannedIncomingDir.IsNearlyZero() || DefenseDir.IsNearlyZero()) return false;
+    if (IncomingDirection.IsNearlyZero() || DefenseDir.IsNearlyZero()) return false;
+    // IncomingDirection is the local travel/sweep tangent of the incoming
+    // contact point, NOT the incoming blade axis. A good parry places the
+    // defender blade close to perpendicular to that travel direction.
+    const float AbsDot = FMath::Clamp(
+        FMath::Abs(FVector::DotProduct(IncomingDirection, DefenseDir)), 0.f, 1.f);
+    const float Crossing = FMath::RadiansToDegrees(FMath::Acos(AbsDot));
+    // Never trade tactical sweep-crossing angle for comfort.
+    constexpr float HardMinimumCrossingAngleDegrees = 80.f;
+    if (Crossing < FMath::Max(MinimumIntersectionAngleDegrees, HardMinimumCrossingAngleDegrees))
+    {
+        ++LastDiagnostics.AngleRejected;
+        return false;
+    }
     // Free DOF #1: slide the defender sword along its own blade axis.
     // DefenderBladeFraction is already sampled by FindBestParryCandidate.
     const FVector CandidateBase = IncomingContactWorld - DefenseDir * (BladeLength * DefenderBladeFraction);
@@ -690,6 +698,29 @@ bool UIronboundParryComponent::EvaluateCandidate(
         if (ExtensionMetrics.Distance < ExtensionMetrics.MinReach ||
             ExtensionMetrics.Distance > ExtensionMetrics.MaxReach)
         {
+            const float ReachError = ExtensionMetrics.Distance < ExtensionMetrics.MinReach
+                ? ExtensionMetrics.MinReach - ExtensionMetrics.Distance
+                : ExtensionMetrics.Distance - ExtensionMetrics.MaxReach;
+            FParryRejectedAnatomyDiagnostic& D = GRejectedAnatomyDiagnostics.FindOrAdd(this);
+            if (!D.bSet || ReachError < D.ReachError)
+            {
+                const FVector NeutralForearmDir = CalculateNeutralForearmDirection(HandTransform);
+                const float WristDeviation = CalculateMinimumWristDeviationAnalytical(
+                    ShoulderWorld, Hand, NeutralForearmDir, UpperArmLength, ForearmLength);
+                D.bSet = true;
+                D.ReachError = ReachError;
+                D.SweepCross = Crossing;
+                D.DefenderBladeFraction = DefenderBladeFraction;
+                D.AxialRollDegrees = FMath::RadiansToDegrees(RollRadians);
+                D.ShoulderHandDistance = ExtensionMetrics.Distance;
+                D.MinReach = ExtensionMetrics.MinReach;
+                D.MaxReach = ExtensionMetrics.MaxReach;
+                D.GeometricFreedom = ExtensionMetrics.GeometricFreedom;
+                D.WristDeviationDegrees = FMath::RadiansToDegrees(WristDeviation);
+                D.Reason = ExtensionMetrics.Distance < ExtensionMetrics.MinReach
+                    ? TEXT("too-close")
+                    : TEXT("too-far");
+            }
             continue;
         }
         const FVector NeutralForearmDir = CalculateNeutralForearmDirection(HandTransform);
@@ -721,20 +752,6 @@ bool UIronboundParryComponent::EvaluateCandidate(
     const FTransform& WeaponTransform = BestWeaponTransform;
     const FTransform& HandTransform = BestHandTransform;
     const FVector Hand = BestHand;
-    // Crossing is defined from the exact two planned blade lines that debug draws:
-    // red = IncomingBaseWorld->IncomingTipWorld, cyan = transformed defender BladeBase->BladeTip.
-    const FVector ExactDefenseBase = WeaponTransform.TransformPosition(Equipment->Definition->BladeBase);
-    const FVector ExactDefenseTip = WeaponTransform.TransformPosition(Equipment->Definition->BladeTip);
-    const FVector ExactDefenseDir = (ExactDefenseTip - ExactDefenseBase).GetSafeNormal();
-    if (ExactDefenseDir.IsNearlyZero()) return false;
-    const float ExactAbsDot = FMath::Clamp(FMath::Abs(FVector::DotProduct(PlannedIncomingDir, ExactDefenseDir)), 0.f, 1.f);
-    const float Crossing = FMath::RadiansToDegrees(FMath::Acos(ExactAbsDot));
-    constexpr float HardMinimumCrossingAngleDegrees = 80.f;
-    if (Crossing < FMath::Max(MinimumIntersectionAngleDegrees, HardMinimumCrossingAngleDegrees))
-    {
-        ++LastDiagnostics.AngleRejected;
-        return false;
-    }
     const float TimeUntilContact = GetTimeUntilIncomingSample(IncomingTime);
     if (TimeUntilContact < MinimumTimeToContact)
     {
@@ -779,8 +796,8 @@ bool UIronboundParryComponent::EvaluateCandidate(
     Out.ContactPoint = IncomingContactWorld;
     Out.IncomingBase = IncomingBaseWorld;
     Out.IncomingTip = IncomingTipWorld;
-    Out.DefenseBase = ExactDefenseBase;
-    Out.DefenseTip = ExactDefenseTip;
+    Out.DefenseBase = CandidateBase;
+    Out.DefenseTip = CandidateTip;
     Out.RequiredWeaponTransform = WeaponTransform;
     Out.RequiredHandTransform = HandTransform;
     Out.RequiredHandPosition = Hand;
@@ -800,6 +817,7 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
     OutCandidate = FIronboundParryCandidate();
     LastDiagnostics = FIronboundParryDiagnostics();
     LastParryEarlyExitReason.Reset();
+    GRejectedAnatomyDiagnostics.Remove(this);
     if (!FighterMesh || !CombatFocus || !bObservedCommittedAttack ||
         !bAttackRecognized || !bReactionReady)
         return false;
@@ -825,8 +843,13 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
         LastParryEarlyExitReason = TEXT("defender blade geometry invalid");
         return false;
     }
-    const float MinFraction = FMath::Clamp(MinParryBladeFraction, 0.f, 1.f);
-    const float MaxFraction = FMath::Clamp(MaxParryBladeFraction, MinFraction, 1.f);
+    // A sweep-perpendicular parry is much more geometrically restrictive than
+    // the old blade-vs-blade crossing test. Do not also restrict contact to the
+    // middle 30..78% of our blade: sliding the contact toward either end is a
+    // genuine free DOF and can move the required hand tens of centimetres.
+    // Keep a tiny margin off the physical endpoints for robust contact.
+    const float MinFraction = 0.05f;
+    const float MaxFraction = 0.95f;
     const FVector Shoulder = FighterMesh->GetSocketLocation(UpperArmBone);
     const FBladeTrajectory& Trajectory = TargetExecution->GetCommittedTrajectory();
     const FTransform& AttackerTransform = TargetExecution->GetCommittedTransform();
@@ -853,13 +876,14 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
         return false;
     }
     const int32 IncomingContactCount = FMath::Max(2, IncomingBladeContactSamples);
-    const int32 BladeFractionCount = FMath::Max(2, DefenderBladeFractionSamples);
+    const int32 BladeFractionCount = FMath::Max(9, DefenderBladeFractionSamples);
     const int32 OrientationCount = FMath::Max(8, DefenseOrientationSamples);
     const int32 CrossingCount = FMath::Max(2, DefenseCrossingAngleSamples);
     TArray<FIronboundParryCandidate> Candidates;
     float BestTacticalQuality = -TNumericLimits<float>::Max();
-    for (const FBladeSegment& Segment : Trajectory.Segments)
+    for (int32 SegmentIndex = 0; SegmentIndex < Trajectory.Segments.Num(); ++SegmentIndex)
     {
+        const FBladeSegment& Segment = Trajectory.Segments[SegmentIndex];
         ++LastDiagnostics.IncomingSegments;
         const float TimeUntil = Segment.TimeSeconds - CurrentSourceTime;
         if (TimeUntil < MinimumTimeToContact)
@@ -879,11 +903,6 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
         const FVector IncomingTip = AttackerTransform.TransformPosition(Segment.Tip);
         const FVector IncomingDir = (IncomingTip - IncomingBase).GetSafeNormal();
         if (IncomingDir.IsNearlyZero()) continue;
-        FVector BasisA = FVector::CrossProduct(IncomingDir, FVector::UpVector);
-        if (BasisA.IsNearlyZero())
-            BasisA = FVector::CrossProduct(IncomingDir, FVector::ForwardVector);
-        BasisA.Normalize();
-        const FVector BasisB = FVector::CrossProduct(IncomingDir, BasisA).GetSafeNormal();
         for (int32 ContactIndex = 0; ContactIndex < IncomingContactCount; ++ContactIndex)
         {
             const float ContactSampleAlpha = float(ContactIndex) / float(IncomingContactCount - 1);
@@ -893,6 +912,31 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
                         MinimumIncomingBladeFraction, 1.f),
                     ContactSampleAlpha);
             const FVector Contact = FMath::Lerp(IncomingBase, IncomingTip, IncomingAlpha);
+
+            // Local swing direction: movement of this exact material point on
+            // the attacker's blade through neighboring trajectory samples.
+            // Central difference where possible, one-sided at the ends.
+            FVector IncomingSweepDir = FVector::ZeroVector;
+            if (Trajectory.Segments.Num() > 1)
+            {
+                const int32 PrevIndex = FMath::Max(0, SegmentIndex - 1);
+                const int32 NextIndex = FMath::Min(Trajectory.Segments.Num() - 1, SegmentIndex + 1);
+                if (PrevIndex != NextIndex)
+                {
+                    const FBladeSegment& PrevSegment = Trajectory.Segments[PrevIndex];
+                    const FBladeSegment& NextSegment = Trajectory.Segments[NextIndex];
+                    const FVector PrevBase = AttackerTransform.TransformPosition(PrevSegment.Base);
+                    const FVector PrevTip = AttackerTransform.TransformPosition(PrevSegment.Tip);
+                    const FVector NextBase = AttackerTransform.TransformPosition(NextSegment.Base);
+                    const FVector NextTip = AttackerTransform.TransformPosition(NextSegment.Tip);
+                    const FVector PrevContact = FMath::Lerp(PrevBase, PrevTip, IncomingAlpha);
+                    const FVector NextContact = FMath::Lerp(NextBase, NextTip, IncomingAlpha);
+                    IncomingSweepDir = (NextContact - PrevContact).GetSafeNormal();
+                }
+            }
+            if (IncomingSweepDir.IsNearlyZero())
+                continue;
+
             ++LastDiagnostics.ContactPoints;
             const float MaxPossibleReach = ArmLength + BladeLength * MaxFraction;
             if (FVector::Distance(Shoulder, Contact) > MaxPossibleReach)
@@ -904,48 +948,90 @@ bool UIronboundParryComponent::FindBestParryCandidate(FIronboundParryCandidate& 
             {
                 const float FractionAlpha = float(FractionIndex) / float(BladeFractionCount - 1);
                 const float DefenderFraction = FMath::Lerp(MinFraction, MaxFraction, FractionAlpha);
+                // The tactical rule is defender blade >=80 degrees to the incoming
+                // contact-point SWEEP, so generate directly in that clash plane.
+                // Seed the ring with shoulder->contact projected into the plane:
+                // this guarantees the search includes the blade direction that can
+                // place the hilt/hand back toward the defender instead of past the hit.
+                FVector ReachDir = (Contact - Shoulder).GetSafeNormal();
+                FVector ClashSeed = ReachDir -
+                    IncomingSweepDir * FVector::DotProduct(ReachDir, IncomingSweepDir);
+                if (!ClashSeed.Normalize())
+                    ClashSeed = FVector::CrossProduct(IncomingSweepDir, IncomingDir).GetSafeNormal();
+                if (ClashSeed.IsNearlyZero())
+                {
+                    FVector FallbackA, FallbackB;
+                    IncomingSweepDir.FindBestAxisVectors(FallbackA, FallbackB);
+                    ClashSeed = FallbackA;
+                }
+                const FVector SweepRingAxis =
+                    FVector::CrossProduct(IncomingSweepDir, ClashSeed).GetSafeNormal();
+                if (SweepRingAxis.IsNearlyZero())
+                    continue;
+
+                // Stay safely inside the hard 80-degree floor. Keep this local for
+                // this controlled fix; no reflected/header property churn.
+                constexpr float MaximumClashTiltDegrees = 8.f;
                 for (int32 CrossingIndex = 0; CrossingIndex < CrossingCount; ++CrossingIndex)
                 {
-                    const float CrossingAlpha = float(CrossingIndex) / float(CrossingCount - 1);
-                    constexpr float HardMinimumCrossingAngleDegrees = 80.f;
-                    const float CrossingDeg = FMath::Lerp(FMath::Max(MinimumIntersectionAngleDegrees, HardMinimumCrossingAngleDegrees), 90.f, CrossingAlpha);
-                    const float CrossingRad = FMath::DegreesToRadians(CrossingDeg);
+                    const float TiltAlpha = CrossingCount > 1
+                        ? float(CrossingIndex) / float(CrossingCount - 1)
+                        : 0.5f;
+                    const float TiltRad = FMath::DegreesToRadians(
+                        FMath::Lerp(-MaximumClashTiltDegrees,
+                                    MaximumClashTiltDegrees,
+                                    TiltAlpha));
                     for (int32 OrientationIndex = 0; OrientationIndex < OrientationCount; ++OrientationIndex)
                     {
-                        const float Around = 2.f * PI * float(OrientationIndex) / float(OrientationCount);
-                        const FVector Ring = BasisA * FMath::Cos(Around) + BasisB * FMath::Sin(Around);
-                        const FVector DefenseDirection = (IncomingDir * FMath::Cos(CrossingRad) +
-                             Ring * FMath::Sin(CrossingRad)).GetSafeNormal();
-                        ++LastDiagnostics.GeneratedCandidates;
-                        FIronboundParryCandidate Candidate;
-                        if (!EvaluateCandidate(
-                            Shoulder,
-                            IncomingBase, IncomingTip, Contact, IncomingDir,
-                            Segment.TimeSeconds, IncomingAlpha,
-                            DefenseDirection, DefenderFraction,
-                            BladeLength, CurrentWeaponTransform,
-                            CurrentDefenseDirection, Candidate))
-                            continue;
-                        const float BodyTimingMargin = FMath::Clamp(
-                                (BodyIntersectionTime - Segment.TimeSeconds) / 0.75f,
-                                0.f,
-                                1.f);
-                        const float CandidateBodyClearance = FindMinimumBodyClearance(
-                                FighterMesh, Candidate.DefenseBase, Candidate.DefenseTip);
-                        const float CandidateBodyClearanceQuality = FMath::Clamp(
-                                CandidateBodyClearance /
-                                    FMath::Max(BodyClearancePreferenceDistance, 1.f),
-                                0.f, 1.f);
-                        Candidate.BodyClearance = CandidateBodyClearance;
-                        Candidate.Quality +=
-                            2.f * BodyTimingMargin +
-                            BodyClearanceQualityWeight * CandidateBodyClearanceQuality;
-                        if (Candidate.Quality > BestTacticalQuality)
+                        const float Around =
+                            2.f * PI * float(OrientationIndex) / float(OrientationCount);
+                        const FVector Ring =
+                            ClashSeed * FMath::Cos(Around) +
+                            SweepRingAxis * FMath::Sin(Around);
+                        const FVector AxisDirection =
+                            (Ring * FMath::Cos(TiltRad) +
+                             IncomingSweepDir * FMath::Sin(TiltRad)).GetSafeNormal();
+
+                        // Crossing is an UNORIENTED blade-axis test (abs(dot)), but
+                        // weapon placement is directed: +D and -D put BladeBase/the
+                        // hilt on opposite sides of Contact. Evaluate both explicitly.
+                        // This is essential for reach; treating the two signs as the
+                        // same axis can put every otherwise-valid hand beyond the target.
+                        for (int32 SignIndex = 0; SignIndex < 2; ++SignIndex)
                         {
-                            BestTacticalQuality = Candidate.Quality;
+                            const FVector DefenseDirection =
+                                SignIndex == 0 ? AxisDirection : -AxisDirection;
+                            ++LastDiagnostics.GeneratedCandidates;
+                            FIronboundParryCandidate Candidate;
+                            if (!EvaluateCandidate(
+                                Shoulder,
+                                IncomingBase, IncomingTip, Contact, IncomingSweepDir,
+                                Segment.TimeSeconds, IncomingAlpha,
+                                DefenseDirection, DefenderFraction,
+                                BladeLength, CurrentWeaponTransform,
+                                CurrentDefenseDirection, Candidate))
+                                continue;
+                            const float BodyTimingMargin = FMath::Clamp(
+                                    (BodyIntersectionTime - Segment.TimeSeconds) / 0.75f,
+                                    0.f,
+                                    1.f);
+                            const float CandidateBodyClearance = FindMinimumBodyClearance(
+                                    FighterMesh, Candidate.DefenseBase, Candidate.DefenseTip);
+                            const float CandidateBodyClearanceQuality = FMath::Clamp(
+                                    CandidateBodyClearance /
+                                        FMath::Max(BodyClearancePreferenceDistance, 1.f),
+                                    0.f, 1.f);
+                            Candidate.BodyClearance = CandidateBodyClearance;
+                            Candidate.Quality +=
+                                2.f * BodyTimingMargin +
+                                BodyClearanceQualityWeight * CandidateBodyClearanceQuality;
+                            if (Candidate.Quality > BestTacticalQuality)
+                            {
+                                BestTacticalQuality = Candidate.Quality;
+                            }
+                            Candidates.Add(Candidate);
+                            ++LastDiagnostics.ValidCandidates;
                         }
-                        Candidates.Add(Candidate);
-                        ++LastDiagnostics.ValidCandidates;
                     }
                 }
             }
@@ -1018,6 +1104,19 @@ void UIronboundParryComponent::LogDiagnosticsOnce() const
         LastDiagnostics.BestRequiredHandSpeed,
         LastDiagnostics.BestRequiredBladeAngularSpeed,
         LastParryEarlyExitReason.IsEmpty() ? TEXT("candidate locked") : *LastParryEarlyExitReason);
+    if (LastDiagnostics.ValidCandidates == 0)
+    {
+        if (const FParryRejectedAnatomyDiagnostic* D = GRejectedAnatomyDiagnostics.Find(this);
+            D && D->bSet)
+        {
+            UE_LOG(LogTemp, Warning,
+                TEXT("ParryAnatomyBestRejected [%s] reason=%s | sweep=%.1f bladeFrac=%.2f roll=%.0f | shoulderHand=%.2fcm reach=[%.2f..%.2f] error=%.2fcm | freedom=%.3f wrist=%.1fdeg"),
+                *GetNameSafe(GetOwner()), *D->Reason,
+                D->SweepCross, D->DefenderBladeFraction, D->AxialRollDegrees,
+                D->ShoulderHandDistance, D->MinReach, D->MaxReach, D->ReachError,
+                D->GeometricFreedom, D->WristDeviationDegrees);
+        }
+    }
 }
 void UIronboundParryComponent::DrawAnatomyDebug() const
 {
