@@ -60,6 +60,8 @@ struct FIronboundParryDiagnostics
 
     int32 AnatomyRejected = 0;
 
+    int32 WristRejected = 0;
+
     int32 BodyRejected = 0;
 
     int32 TimingRejected = 0;
@@ -174,6 +176,8 @@ struct FCandidateRawMetrics
     float WristDeviationRadians; // 0-PI biomechanical metric
 
     float GeometricFreedom;     // 0-1 biomechanical metric
+
+    float ExtensionRatio;       // shoulder-to-hand distance / maximum two-link reach
 
     bool bGeometricallyValid;   // Passes reach constraints
 
