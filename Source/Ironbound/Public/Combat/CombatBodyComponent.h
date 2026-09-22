@@ -1,35 +1,35 @@
-#pragma once
+﻿#pragma once
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "IronboundCombatBodyComponent.generated.h"
+#include "CombatBodyComponent.generated.h"
 
 class UPhysicsControlComponent;
 class USkeletalMeshComponent;
 class UPrimitiveComponent;
-class UIronboundCombatBodyComponent;
+class UCombatBodyComponent;
 
 USTRUCT()
-struct FIronboundBodyPostPhysicsTick : public FTickFunction
+struct FCombatBodyPostPhysicsTick : public FTickFunction
 {
 	GENERATED_BODY()
-	UIronboundCombatBodyComponent* Target = nullptr;
+	UCombatBodyComponent* Target = nullptr;
 	virtual void ExecuteTick(float DeltaTime, ELevelTick TickType, ENamedThreads::Type CurrentThread, const FGraphEventRef& CompletionEvent) override;
 	virtual FString DiagnosticMessage() override { return TEXT("Ironbound body tracking diagnostics"); }
 };
 
-template<> struct TStructOpsTypeTraits<FIronboundBodyPostPhysicsTick> : TStructOpsTypeTraitsBase2<FIronboundBodyPostPhysicsTick>
+template<> struct TStructOpsTypeTraits<FCombatBodyPostPhysicsTick> : TStructOpsTypeTraitsBase2<FCombatBodyPostPhysicsTick>
 {
 	enum { WithCopy = false };
 };
 
 /** Owns living physical animation and victim reactions. Legs stay animated until death. */
 UCLASS(ClassGroup=(Ironbound), meta=(BlueprintSpawnableComponent))
-class IRONBOUND_API UIronboundCombatBodyComponent : public UActorComponent
+class IRONBOUND_API UCombatBodyComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
 public:
-	UIronboundCombatBodyComponent();
+	UCombatBodyComponent();
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Tracking")
 	float WeaponTrackingStrength = 60.f;
@@ -124,7 +124,7 @@ public:
 	void MeasureTracking();
 
 private:
-	FIronboundBodyPostPhysicsTick PostPhysicsTick;
+	FCombatBodyPostPhysicsTick PostPhysicsTick;
 
 	UPROPERTY(Transient)
 	TObjectPtr<USkeletalMeshComponent> FighterMesh;

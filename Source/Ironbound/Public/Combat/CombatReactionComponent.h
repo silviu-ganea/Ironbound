@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Combat/CombatInteractionTypes.h"
 #include "CombatReactionComponent.generated.h"
 
 class UFighterVitalsComponent;
@@ -45,6 +46,17 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat|Reaction")
 	bool ReceiveCombatHit(float DamageAmount, int32 AttackerTeam);
+
+	/**
+	 * Typed interaction intake. This is the proper combat path: the caller
+	 * builds the FCombatInteraction from the physical contact, resolves it
+	 * through UCombatInteractionLibrary, and feeds the typed result here.
+	 * ReceiveCombatHit remains as the transitional untyped seam.
+	 */
+	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat|Reaction")
+	bool ReceiveInteraction(
+		const FCombatInteraction& Interaction,
+		const FCombatInteractionResult& Result);
 
 	/** Team this fighter reacts for, read from the same authority combat uses. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Combat|Reaction")

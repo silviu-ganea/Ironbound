@@ -1,0 +1,539 @@
+﻿#include "Combat/CombatExecutor_MeleeStrike.h"
+
+#include "Combat/CombatEquipmentComponent.h"
+#include "Combat/CombatTechniqueExecutionConfigs.h"
+#include "Combat/CombatTechniqueRow.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
+#include "Ironbound.h"
+
+// Immutable attack-solver limits. Analyzer constants stay inside the
+// trajectory library; these are engagement-phase limits only.
+namespace
+{
+	constexpr float GStancePreparationTimeout = 1.5f;
+	constexpr float GCommitTimeoutExtraSeconds = 2.f;
+
+	/*
+	 * Temporary contact tolerance while targets are represented by skeletal
+	 * bone points (same value the trajectory library uses for feasibility).
+	 */
+	constexpr float GContactToleranceCm = 25.f;
+}
+
+const UExecConfig_MeleeStrike* UCombatExecutor_MeleeStrike::StrikeConfig() const
+{
+	return Cast<UExecConfig_MeleeStrike>(Config);
+}
+
+bool UCombatExecutor_MeleeStrike::OnInitialize(
+	const FCombatTechniqueRequest& Request)
+{
+	const UExecConfig_MeleeStrike* LocalConfig = StrikeConfig();
+	if (!LocalConfig)
+	{
+		UE_LOG(
+			LogIronboundCombat,
+			Warning,
+			TEXT("MeleeStrike [%s | %s]: row does not use a melee-strike execution config"),
+			*GetNameSafe(GetFighter()),
+			*Request.TechniqueId.ToString());
+
+		return false;
+	}
+
+	if (!LocalConfig->SourceSequence || !LocalConfig->CombatTargets || !LocalConfig->Montage)
+	{
+		UE_LOG(
+			LogIronboundCombat,
+			Warning,
+			TEXT("MeleeStrike [%s | %s]: execution config is incomplete (SourceSequence, CombatTargets and Montage are required)"),
+			*GetNameSafe(GetFighter()),
+			*Request.TechniqueId.ToString());
+
+		return false;
+	}
+
+	AActor* Target = Request.Target;
+	if (!IsValid(Target))
+	{
+		UE_LOG(
+			LogIronboundCombat,
+			Warning,
+			TEXT("MeleeStrike [%s | %s]: request has no valid target"),
+			*GetNameSafe(GetFighter()),
+			*Request.TechniqueId.ToString());
+
+		return false;
+	}
+
+	UCombatEquipmentComponent* Equipment = GetEquipment();
+	if (!Equipment || !Equipment->bReady || !Equipment->Definition)
+	{
+		UE_LOG(
+			LogIronboundCombat,
+			Warning,
+			TEXT("MeleeStrike [%s | %s]: no ready equipment"),
+			*GetNameSafe(GetFighter()),
+			*Request.TechniqueId.ToString());
+
+		return false;
+	}
+
+	PlannedTarget = Target;
+
+	FBladeTrajectory Trajectory;
+	if (!BuildAttackTrajectory(Trajectory))
+	{
+		UE_LOG(
+			LogIronboundCombat,
+			Warning,
+			TEXT("MeleeStrike [%s | %s]: could not derive blade trajectory"),
+			*GetNameSafe(GetFighter()),
+			*Request.TechniqueId.ToString());
+
+		return false;
+	}
+
+	PlannedTrajectory = MoveTemp(Trajectory);
+
+	if (!SolveAttackPlan())
+	{
+		UE_LOG(
+			LogIronboundCombat,
+			Log,
+			TEXT("MeleeStrike [%s | %s]: no attack plan"),
+			*GetNameSafe(GetFighter()),
+			*Request.TechniqueId.ToString());
+
+		return false;
+	}
+
+	RequestWorldTime = GetWorld()->GetTimeSeconds();
+	CommitDeadline = RequestWorldTime + PlannedTrajectory.ActiveEndTime + GCommitTimeoutExtraSeconds;
+
+	LastLocation = GetFighter()->GetActorLocation();
+	bHasPreviousLocation = true;
+
+	CachedRequirement.bHasRequirement = true;
+	CachedRequirement.DesiredLocation = PlannedTransform.GetLocation();
+	CachedRequirement.DesiredFacing = PlannedTransform.Rotator();
+	CachedRequirement.ArrivalTolerance = LocalConfig->ArrivalTolerance;
+	CachedRequirement.FacingTolerance = LocalConfig->FacingTolerance;
+	CachedRequirement.bMayMoveDuringExecution = true;
+
+	Phase = EStrikePhase::Waiting;
+
+	UE_LOG(
+		LogIronboundCombat,
+		Log,
+		TEXT("MeleeStrike [%s | %s] stance solved: region=%s bone=%s score=%.1f miss=%.1f"),
+		*GetNameSafe(GetFighter()),
+		*Request.TechniqueId.ToString(),
+		*PlannedTargetRegion.ToString(),
+		*PlannedTargetBone.ToString(),
+		PlannedTargetScore,
+		CurrentPredictedDistance);
+
+	return true;
+}
+
+bool UCombatExecutor_MeleeStrike::BuildAttackTrajectory(
+	FBladeTrajectory& OutTrajectory) const
+{
+	UCombatEquipmentComponent* Equipment = GetEquipment();
+	if (!Equipment)
+	{
+		return false;
+	}
+
+	return Equipment->GetTrajectory(StrikeConfig()->SourceSequence, OutTrajectory);
+}
+
+bool UCombatExecutor_MeleeStrike::SolveAttackPlan()
+{
+	AActor* Fighter = GetFighter();
+	USkeletalMeshComponent* FighterMesh = GetFighterMesh();
+	AActor* Target = PlannedTarget.Get();
+
+	USkeletalMeshComponent* TargetMesh =
+		Target ? Target->FindComponentByClass<USkeletalMeshComponent>() : nullptr;
+
+	if (!Fighter || !FighterMesh || !TargetMesh)
+	{
+		return false;
+	}
+
+	FTransform Stance;
+	int32 UnusedSampleIndex = INDEX_NONE;
+
+	if (!UCombatTrajectoryLibrary::SolveAttackAlignment(
+			FighterMesh,
+			TargetMesh,
+			PlannedTrajectory,
+			StrikeConfig()->CombatTargets,
+			Stance,
+			PlannedTargetRegion,
+			PlannedTargetBone,
+			UnusedSampleIndex,
+			CurrentPredictedDistance,
+			PlannedTargetScore))
+	{
+		return false;
+	}
+
+	PlannedTransform = Stance;
+	return true;
+}
+
+bool UCombatExecutor_MeleeStrike::IsAtStancePosition() const
+{
+	const AActor* Fighter = GetFighter();
+	if (!Fighter)
+	{
+		return false;
+	}
+
+	return Fighter->GetActorLocation().Equals(
+		PlannedTransform.GetLocation(),
+		StrikeConfig()->ArrivalTolerance);
+}
+
+bool UCombatExecutor_MeleeStrike::IsReadyToCommit() const
+{
+	const UExecConfig_MeleeStrike* LocalConfig = StrikeConfig();
+
+	return FMath::Abs(FacingErrorDegrees) <= LocalConfig->FacingTolerance &&
+		   MeasuredSpeed <= LocalConfig->SettledSpeed &&
+		   CurrentPredictedDistance <= GContactToleranceCm;
+}
+
+bool UCombatExecutor_MeleeStrike::HasStanceTimedOut(float Now) const
+{
+	return Now - RequestWorldTime > GStancePreparationTimeout ||
+		   !PlannedTarget.IsValid();
+}
+
+void UCombatExecutor_MeleeStrike::UpdateMeasuredSpeed(float DeltaTime)
+{
+	const AActor* Fighter = GetFighter();
+	if (!Fighter)
+	{
+		return;
+	}
+
+	if (bHasPreviousLocation && DeltaTime > SMALL_NUMBER)
+	{
+		MeasuredSpeed =
+			FVector::Dist(LastLocation, Fighter->GetActorLocation()) / DeltaTime;
+	}
+
+	LastLocation = Fighter->GetActorLocation();
+	bHasPreviousLocation = true;
+}
+
+void UCombatExecutor_MeleeStrike::UpdateFacingError()
+{
+	const AActor* Fighter = GetFighter();
+	if (!Fighter)
+	{
+		return;
+	}
+
+	const float RequiredYaw = PlannedTransform.Rotator().Yaw;
+	const float CurrentYaw = Fighter->GetActorRotation().Yaw;
+
+	FacingErrorDegrees =
+		FMath::FindDeltaAngleDegrees(CurrentYaw, RequiredYaw);
+}
+
+void UCombatExecutor_MeleeStrike::UpdateCommittedFacingError()
+{
+	const AActor* Fighter = GetFighter();
+	if (!Fighter)
+	{
+		return;
+	}
+
+	const float RequiredYaw = PlannedTransform.Rotator().Yaw;
+	const float CurrentYaw = Fighter->GetActorRotation().Yaw;
+
+	const float FacingError =
+		FMath::Abs(FMath::FindDeltaAngleDegrees(CurrentYaw, RequiredYaw));
+
+	MaxCommittedFacingError =
+		FMath::Max(MaxCommittedFacingError, FacingError);
+}
+
+void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
+{
+	AActor* Fighter = GetFighter();
+	UWorld* World = GetWorld();
+	if (!Fighter || !World)
+	{
+		return;
+	}
+
+	const float Now = World->GetTimeSeconds();
+
+	switch (Phase)
+	{
+	case EStrikePhase::Waiting:
+	{
+		UpdateMeasuredSpeed(DeltaTime);
+
+		if (HasStanceTimedOut(Now))
+		{
+			FinishExecution(TEXT("stance timed out"));
+			return;
+		}
+
+		// Track a moving target: re-solve while waiting, exactly like the old
+		// per-call re-solve did.
+		if (!SolveAttackPlan())
+		{
+			FinishExecution(TEXT("attack plan lost"));
+			return;
+		}
+
+		bAtStancePosition = IsAtStancePosition();
+
+		if (bAtStancePosition)
+		{
+			// Once positioned, only facing and settling remain; movement
+			// during execution is no longer part of the engagement.
+			CachedRequirement.bMayMoveDuringExecution = false;
+
+			UpdateFacingError();
+			AttackFacingIntent = PlannedTransform.GetRotation().GetForwardVector();
+
+			if (IsReadyToCommit())
+			{
+				CommitStrike();
+			}
+		}
+		else
+		{
+			CachedRequirement.bMayMoveDuringExecution = true;
+			FacingErrorDegrees = 0.f;
+		}
+
+		CachedRequirement.DesiredLocation = PlannedTransform.GetLocation();
+		CachedRequirement.DesiredFacing = PlannedTransform.Rotator();
+
+		break;
+	}
+
+	case EStrikePhase::Committed:
+	{
+		UpdateCommittedFacingError();
+
+		if (bAtStancePosition)
+		{
+			AttackFacingIntent = PlannedTransform.GetRotation().GetForwardVector();
+		}
+
+		if (Now > CommitDeadline)
+		{
+			FinishExecution(TEXT("commit expired"));
+			return;
+		}
+
+		DrawAttackDebug();
+
+		break;
+	}
+
+	case EStrikePhase::Recovering:
+	{
+		if (Now >= RecoveryUntil)
+		{
+			FinishExecution(TEXT("recovered"));
+			return;
+		}
+
+		break;
+	}
+	}
+}
+
+void UCombatExecutor_MeleeStrike::CommitStrike()
+{
+	AActor* Fighter = GetFighter();
+	USkeletalMeshComponent* FighterMesh = GetFighterMesh();
+	const UExecConfig_MeleeStrike* LocalConfig = StrikeConfig();
+
+	if (!Fighter || !FighterMesh || !LocalConfig)
+	{
+		return;
+	}
+
+	CommittedTransform = Fighter->GetActorTransform();
+	MaxCommittedFacingError = FMath::Abs(FacingErrorDegrees);
+
+	MarkRecordCommitted(PlannedTrajectory, CommittedTransform);
+	Phase = EStrikePhase::Committed;
+
+	UAnimInstance* AnimInstance = FighterMesh->GetAnimInstance();
+	if (!AnimInstance)
+	{
+		UE_LOG(
+			LogIronboundCombat,
+			Error,
+			TEXT("MeleeStrike [%s | %s]: no anim instance to play the strike montage"),
+			*GetNameSafe(Fighter),
+			*GetRequest().TechniqueId.ToString());
+
+		FinishExecution(TEXT("no anim instance"));
+		return;
+	}
+
+	FOnMontageEnded MontageEnded;
+	MontageEnded.BindUObject(this, &UCombatExecutor_MeleeStrike::HandleMontageEnded);
+
+	AnimInstance->Montage_Play(LocalConfig->Montage);
+	AnimInstance->Montage_SetEndDelegate(MontageEnded, LocalConfig->Montage);
+	bMontagePlaying = true;
+
+	UE_LOG(
+		LogIronboundCombat,
+		Log,
+		TEXT("MeleeStrike [%s | %s] committed: region=%s bone=%s score=%.1f miss=%.1f"),
+		*GetNameSafe(Fighter),
+		*GetRequest().TechniqueId.ToString(),
+		*PlannedTargetRegion.ToString(),
+		*PlannedTargetBone.ToString(),
+		PlannedTargetScore,
+		CurrentPredictedDistance);
+}
+
+void UCombatExecutor_MeleeStrike::HandleMontageEnded(
+	UAnimMontage* Montage,
+	bool bInterrupted)
+{
+	if (Phase != EStrikePhase::Committed)
+	{
+		return;
+	}
+
+	EnterRecovery();
+}
+
+void UCombatExecutor_MeleeStrike::EnterRecovery()
+{
+	Phase = EStrikePhase::Recovering;
+
+	SetRecordState(ECombatExecutionState::Recovering);
+	SetRecordStrikeWindow(false);
+
+	UWorld* World = GetWorld();
+	RecoveryUntil =
+		World ? World->GetTimeSeconds() + StrikeConfig()->RecoverySeconds : 0.f;
+
+	if (bMontagePlaying)
+	{
+		if (USkeletalMeshComponent* FighterMesh = GetFighterMesh())
+		{
+			if (UAnimInstance* AnimInstance = FighterMesh->GetAnimInstance())
+			{
+				AnimInstance->Montage_Stop(0.2f);
+			}
+		}
+
+		bMontagePlaying = false;
+	}
+}
+
+void UCombatExecutor_MeleeStrike::OnFinish()
+{
+	if (bMontagePlaying)
+	{
+		if (USkeletalMeshComponent* FighterMesh = GetFighterMesh())
+		{
+			if (UAnimInstance* AnimInstance = FighterMesh->GetAnimInstance())
+			{
+				AnimInstance->Montage_Stop(0.1f);
+			}
+		}
+
+		bMontagePlaying = false;
+	}
+
+	// Old semantics preserved: a cancelled alignment must not silently stand
+	// at the stance yaw facing nothing.
+	AttackFacingIntent = FVector::ZeroVector;
+}
+
+void UCombatExecutor_MeleeStrike::OnExternalFinishRequest()
+{
+	// Legacy montage-end seam: committed -> recovery, same as old FinishAttack.
+	if (Phase == EStrikePhase::Committed)
+	{
+		EnterRecovery();
+		return;
+	}
+
+	FinishExecution(TEXT("external finish"));
+}
+
+void UCombatExecutor_MeleeStrike::GetEngagementRequirement(
+	FCombatEngagementRequirement& OutRequirement) const
+{
+	if (Phase == EStrikePhase::Waiting)
+	{
+		OutRequirement = CachedRequirement;
+		return;
+	}
+
+	OutRequirement = FCombatEngagementRequirement();
+}
+
+bool UCombatExecutor_MeleeStrike::GetFacingIntent(FVector& OutIntent) const
+{
+	OutIntent = AttackFacingIntent;
+	return !AttackFacingIntent.IsNearlyZero();
+}
+
+bool UCombatExecutor_MeleeStrike::IsAwaitingAlignment() const
+{
+	return Phase == EStrikePhase::Waiting && bAtStancePosition;
+}
+
+float UCombatExecutor_MeleeStrike::GetFacingDeltaDegrees() const
+{
+	return IsAwaitingAlignment() ? FacingErrorDegrees : 0.f;
+}
+
+void UCombatExecutor_MeleeStrike::DrawAttackDebug()
+{
+	AActor* Fighter = GetFighter();
+	UWorld* World = GetWorld();
+
+	if (!Fighter || !World || !StrikeConfig()->bDrawDebugBlade)
+	{
+		return;
+	}
+
+	/*
+	 * Committed trajectory in current pose vs actual weapon blade.
+	 */
+	for (int32 Index = 1; Index < PlannedTrajectory.Segments.Num(); ++Index)
+	{
+		const FBladeSegment& Previous = PlannedTrajectory.Segments[Index - 1];
+		const FBladeSegment& Current = PlannedTrajectory.Segments[Index];
+
+		DrawDebugLine(
+			World,
+			CommittedTransform.TransformPosition(Previous.Tip),
+			CommittedTransform.TransformPosition(Current.Tip),
+			FColor::Red,
+			false,
+			0.f,
+			0,
+			1.f);
+	}
+}

@@ -5,21 +5,23 @@
 #include "Combat/FighterTypes.h"
 #include "FighterComponent.generated.h"
 
-class UIronboundCombatFocusComponent;
+class UDataTable;
 
 /**
  * A single fighter: persistent identity plus the runtime state of one battle.
  *
- * This component is the only owner of fighter identity, attributes, skills and team
- * state. The physical fighter is a separate actor (for example SandboxCharacter_Mover),
- * which owns movement, animation, body physics and equipment but no second copy of the
+ * This component is the only owner of fighter identity, attributes, skills,
+ * techniques repertoire, weapon proficiency and team state. The physical
+ * fighter is a separate actor (for example SandboxCharacter_Mover), which owns
+ * movement, animation, body physics and equipment but no second copy of the
  * fighter's identity.
  *
  * Persistent state (FighterData) is authored once and never mutated by combat.
- * Battle-scoped state (BattleAttributes, BattleSkills, BattleTeamId) is assigned per
- * battle. BattleTeamId is runtime state and is not part of FFighter.
+ * Battle-scoped state (BattleAttributes, BattleRepertoire, BattleTeamId) is
+ * assigned per battle. BattleTeamId is runtime state and is not part of
+ * FFighter.
  */
-UCLASS(ClassGroup=(Ironbound), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup=(Combat), meta=(BlueprintSpawnableComponent))
 class IRONBOUND_API UFighterComponent : public UActorComponent
 {
 	GENERATED_BODY()
@@ -27,20 +29,39 @@ class IRONBOUND_API UFighterComponent : public UActorComponent
 public:
 	UFighterComponent();
 
-	/** Persistent identity, attributes and learned skills. */
+	/** Persistent identity, attributes, learned skills and weapon proficiencies. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter")
 	FFighter FighterData;
 
-	/** Mutable per-battle copy of FighterData.Attributes. */
+	/**
+	 * Mutable per-battle copy of FighterData.Attributes.
+	 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Fighter|Battle")
 	FFighterAttributes BattleAttributes;
 
 	/**
+	 * BATTLE REPERTOIRE: the TECHNIQUES selected/prepared for this battle.
+	 *
+	 * Entries are technique ids (row names of DT_CombatTechniques), never
+	 * skill ids. A technique references its RequiredSkills; availability is
+	 * computed by the technique component from this repertoire, the learned
+	 * skills, weapon proficiency and current equipment.
+	 */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Fighter|Battle")
+	TArray<FName> BattleRepertoire;
+
+	/**
+	 * Optional reference to DT_CombatTechniques used by SelectBattleTechnique
+	 * to validate a technique's RequiredSkills against the learned skills.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fighter|Battle")
+	TObjectPtr<UDataTable> BattleTechniquesTable;
+
+	/**
 	 * The subset of the fighter's learned skills selected for the current battle.
 	 *
-	 * Not filled from FighterData.LearnedSkills: a battle loadout is a selection, so a skill
-	 * the fighter has learned is not automatically one it brings into this fight. Populate it
-	 * with SelectBattleSkill/SetBattleSkills.
+	 * Deprecated legacy loadout (skill ids of the retired attack-row era).
+	 * Kept temporarily for existing Blueprint wiring; use BattleRepertoire.
 	 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Fighter|Battle")
 	TArray<FLearnedSkill> BattleSkills;
@@ -59,7 +80,7 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
 	void InitializeFighter(const FFighter& InFighterData);
 
-	/** Assigns the runtime battle team, keeping the legacy combat readers in step. */
+	/** Assigns the runtime battle team. This component is the single team authority. */
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
 	void SetBattleTeamId(int32 InTeamId);
 
@@ -85,6 +106,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
 	void SetBattleAttributes(const FFighterAttributes& InAttributes);
 
+	// ===== Skills (knowledge) =====
+
 	/** Adds a skill to the persistent learned list, or updates it when the ID already exists. */
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
 	bool LearnSkill(const FLearnedSkill& Skill);
@@ -98,24 +121,62 @@ public:
 	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
 	int32 GetLearnedSkillCount() const { return FighterData.LearnedSkills.Num(); }
 
+	// ===== Weapon proficiency (belonging to the fighter, not the weapon) =====
+
+	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
+	bool SetWeaponProficiency(const FFighterWeaponProficiency& Proficiency);
+
+	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
+	float GetWeaponProficiency(const FGameplayTag& FamilyTag, float FallbackProficiency = 0.f) const;
+
+	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
+	TArray<FFighterWeaponProficiency> GetWeaponProficiencies() const { return FighterData.WeaponProficiencies; }
+
+	// ===== Battle repertoire (techniques) =====
+
 	/**
-	 * Puts a learned skill into this battle's loadout. Fails for a skill the fighter never
-	 * learned, so the loadout can never reference a skill the fighter does not know.
+	 * Prepares a technique for this battle. Validates the technique's
+	 * RequiredSkills against the learned skills when the technique table is
+	 * available; the technique id must reference DT_CombatTechniques rows, not
+	 * skill rows.
 	 */
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
+	bool SelectBattleTechnique(FName TechniqueId);
+
+	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
+	bool RemoveBattleTechnique(FName TechniqueId);
+
+	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
+	bool IsBattleTechniqueSelected(FName TechniqueId) const;
+
+	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
+	TArray<FName> GetBattleRepertoire() const { return BattleRepertoire; }
+
+	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
+	void ClearBattleRepertoire();
+
+	/** Bumped whenever the repertoire changes; availability caches watch this. */
+	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
+	int32 GetRepertoireRevision() const { return RepertoireRevision; }
+
+	// ===== Deprecated legacy loadout (skill ids) =====
+
+	UFUNCTION(BlueprintCallable, Category="Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Battle repertoire holds technique ids now; use SelectBattleTechnique."))
 	bool SelectBattleSkill(FName SkillId);
 
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
+	UFUNCTION(BlueprintCallable, Category="Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Use RemoveBattleTechnique."))
 	bool RemoveBattleSkill(FName SkillId);
 
-	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
+	UFUNCTION(BlueprintPure, Category="Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Use IsBattleTechniqueSelected."))
 	bool IsBattleSkillSelected(FName SkillId) const;
 
-	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
+	UFUNCTION(BlueprintPure, Category="Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Use GetBattleRepertoire."))
 	TArray<FLearnedSkill> GetBattleSkills() const { return BattleSkills; }
 
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
+	UFUNCTION(BlueprintCallable, Category="Deprecated", meta=(DeprecatedFunction, DeprecationMessage="Use ClearBattleRepertoire."))
 	void ClearBattleSkills();
+
+	// ===== Team relations =====
 
 	/** Same valid team. Self and unteamed (Team 0) fighters are never allies. */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
@@ -131,4 +192,7 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
 	static int32 GetFighterTeamId(const AActor* FighterActor);
+
+private:
+	int32 RepertoireRevision = 0;
 };

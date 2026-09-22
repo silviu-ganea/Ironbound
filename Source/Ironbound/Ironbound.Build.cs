@@ -17,6 +17,7 @@ public class Ironbound : ModuleRules
 				"Engine",
 				"AIModule",
 				"PhysicsControl",
+				"GameplayTags",
 			});
 	}
 }

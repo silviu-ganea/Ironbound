@@ -1,6 +1,7 @@
 #include "Combat/FighterComponent.h"
 
-#include "Combat/IronboundCombatFocusComponent.h"
+#include "Combat/CombatTechniqueRow.h"
+#include "Engine/DataTable.h"
 
 UFighterComponent::UFighterComponent()
 {
@@ -16,27 +17,16 @@ void UFighterComponent::InitializeFighter(const FFighter& InFighterData)
 	BattleAttributes = FighterData.Attributes;
 
 	// A battle starts unteamed: registration is what puts the fighter on a side.
-	// BattleSkills is deliberately left alone - the battle loadout is chosen separately, and
-	// learning a skill does not make it an active one.
+	// BattleRepertoire is deliberately left alone - the battle loadout is chosen separately,
+	// and learning a skill does not automatically prepare any technique.
 	SetBattleTeamId(0);
 }
 
 void UFighterComponent::SetBattleTeamId(int32 InTeamId)
 {
+	// Single team authority: readers (focus, vitals, body, battle manager) all
+	// come through this component; no duplicated team state is maintained.
 	BattleTeamId = FMath::Max(0, InTeamId);
-
-	// Compatibility bridge. The existing combat systems still read their side from
-	// UIronboundCombatFocusComponent (see COMBAT_ARCHITECTURE.md). Team assignment therefore
-	// has exactly one authority - this component - and the legacy reader is kept in step
-	// instead of being refactored. Team is written directly so Focus's target selection and
-	// alive state are left untouched.
-	if (const AActor* Owner = GetOwner())
-	{
-		if (UIronboundCombatFocusComponent* Focus = Owner->FindComponentByClass<UIronboundCombatFocusComponent>())
-		{
-			Focus->Team = BattleTeamId;
-		}
-	}
 }
 
 void UFighterComponent::SetBattleAttributes(const FFighterAttributes& InAttributes)
@@ -85,6 +75,102 @@ bool UFighterComponent::FindLearnedSkill(FName SkillId, FLearnedSkill& OutSkill)
 	}
 
 	return false;
+}
+
+bool UFighterComponent::SetWeaponProficiency(const FFighterWeaponProficiency& Proficiency)
+{
+	if (!Proficiency.FamilyTag.IsValid())
+	{
+		return false;
+	}
+
+	if (FFighterWeaponProficiency* Existing = FighterData.WeaponProficiencies.FindByPredicate(
+		[&Proficiency](const FFighterWeaponProficiency& Candidate)
+		{ return Candidate.FamilyTag == Proficiency.FamilyTag; }))
+	{
+		*Existing = Proficiency;
+		return true;
+	}
+
+	FighterData.WeaponProficiencies.Add(Proficiency);
+	return true;
+}
+
+float UFighterComponent::GetWeaponProficiency(
+	const FGameplayTag& FamilyTag,
+	float FallbackProficiency) const
+{
+	if (!FamilyTag.IsValid())
+	{
+		return FallbackProficiency;
+	}
+
+	const FFighterWeaponProficiency* Found = FighterData.WeaponProficiencies.FindByPredicate(
+		[&FamilyTag](const FFighterWeaponProficiency& Candidate)
+		{ return Candidate.FamilyTag.MatchesTag(FamilyTag); });
+
+	return Found ? FMath::Clamp(Found->Proficiency, 0.f, 1.f) : FallbackProficiency;
+}
+
+bool UFighterComponent::SelectBattleTechnique(FName TechniqueId)
+{
+	if (TechniqueId.IsNone())
+	{
+		return false;
+	}
+
+	// Techniques belong to DT_CombatTechniques; validate their required
+	// skills against what this fighter actually learned.
+	if (BattleTechniquesTable)
+	{
+		const FCombatTechniqueRow* Row = BattleTechniquesTable->FindRow<FCombatTechniqueRow>(
+			TechniqueId, TEXT("SelectBattleTechnique"), /*bWarnIfRowMissing=*/false);
+
+		if (!Row)
+		{
+			return false;
+		}
+
+		for (const FName SkillId : Row->RequiredSkills)
+		{
+			if (!HasLearnedSkill(SkillId))
+			{
+				return false;
+			}
+		}
+	}
+
+	if (!BattleRepertoire.Contains(TechniqueId))
+	{
+		BattleRepertoire.Add(TechniqueId);
+		++RepertoireRevision;
+	}
+
+	return true;
+}
+
+bool UFighterComponent::RemoveBattleTechnique(FName TechniqueId)
+{
+	const bool bRemoved = BattleRepertoire.Remove(TechniqueId) > 0;
+	if (bRemoved)
+	{
+		++RepertoireRevision;
+	}
+	return bRemoved;
+}
+
+bool UFighterComponent::IsBattleTechniqueSelected(FName TechniqueId) const
+{
+	return BattleRepertoire.Contains(TechniqueId);
+}
+
+void UFighterComponent::ClearBattleRepertoire()
+{
+	if (!BattleRepertoire.IsEmpty())
+	{
+		BattleRepertoire.Reset();
+		++RepertoireRevision;
+	}
 }
 
 bool UFighterComponent::SelectBattleSkill(FName SkillId)

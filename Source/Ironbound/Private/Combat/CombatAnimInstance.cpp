@@ -1,28 +1,31 @@
-#include "Combat/IronboundCombatAnimInstance.h"
-#include "Combat/IronboundCombatFocusComponent.h"
-#include "Combat/IronboundCombatExecutionComponent.h"
-#include "Combat/IronboundParryComponent.h"
+#include "Combat/CombatAnimInstance.h"
+
+#include "Combat/CombatExecutionComponent.h"
+#include "Combat/CombatFocusComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 
-void UIronboundCombatAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
+void UCombatAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 {
     Super::NativeUpdateAnimation(DeltaSeconds);
 
     const AActor* Owner = GetOwningActor();
 
     const auto* Focus =
-        Owner ? Owner->FindComponentByClass<UIronboundCombatFocusComponent>() : nullptr;
+        Owner ? Owner->FindComponentByClass<UCombatFocusComponent>() : nullptr;
     const AActor* Target = Focus ? Focus->GetCombatTarget() : nullptr;
     const auto* Execution =
-        Owner ? Owner->FindComponentByClass<UIronboundCombatExecutionComponent>() : nullptr;
-    const auto* Parry =
-        Owner ? Owner->FindComponentByClass<UIronboundParryComponent>() : nullptr;
+        Owner ? Owner->FindComponentByClass<UCombatExecutionComponent>() : nullptr;
 
     // C++ owns the selected hand transform only. CCDIK determines the actual
-    // elbow/shoulder/torso solution; no elbow target is exported.
-    ParryIKActive = Parry && Parry->HasActiveParryPose();
-    ParryHandTarget =
-        ParryIKActive ? Parry->GetActiveParryHandTransform() : FTransform::Identity;
+    // elbow/shoulder/torso solution; no elbow target is exported. The active
+    // reactive execution (procedural parry) publishes the hand target through
+    // the execution component; the anim instance never talks to the executor
+    // directly.
+    ParryIKActive = Execution && Execution->GetActiveHandTarget(ParryHandTarget);
+    if (!ParryIKActive)
+    {
+        ParryHandTarget = FTransform::Identity;
+    }
 
     if (USkeletalMeshComponent* AnimMesh = GetSkelMeshComponent())
     {

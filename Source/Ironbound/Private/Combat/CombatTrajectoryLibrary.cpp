@@ -1,8 +1,8 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "Combat/IronboundTrajectoryLibrary.h"
-#include "Combat/IronboundCombatTarget.h"
-#include "Combat/IronboundEquipmentComponent.h"
+#include "Combat/CombatTrajectoryLibrary.h"
+#include "Combat/CombatTarget.h"
+#include "Combat/CombatEquipmentComponent.h"
 
 #include "Animation/AnimSequenceBase.h"
 #include "Components/CapsuleComponent.h"
@@ -273,7 +273,7 @@ namespace
 }
 
 
-bool UIronboundTrajectoryLibrary::BuildBladeTrajectory(
+bool UCombatTrajectoryLibrary::BuildBladeTrajectory(
 	USkeletalMeshComponent* SourceMesh,
 	UStaticMeshComponent* SwordComponent,
 	UAnimSequenceBase* Sequence,
@@ -287,7 +287,7 @@ bool UIronboundTrajectoryLibrary::BuildBladeTrajectory(
 		SourceMesh->GetOwner()
 			? SourceMesh->GetOwner()
 				  ->FindComponentByClass<
-					  UIronboundEquipmentComponent>()
+					  UCombatEquipmentComponent>()
 			: nullptr;
 
 	if (!Equipment ||
@@ -312,7 +312,7 @@ bool UIronboundTrajectoryLibrary::BuildBladeTrajectory(
 }
 
 
-bool UIronboundTrajectoryLibrary::
+bool UCombatTrajectoryLibrary::
 	BuildBladeTrajectoryWithGrip(
 		USkeletalMeshComponent* SourceMesh,
 		UStaticMeshComponent* SwordComponent,
@@ -752,7 +752,7 @@ bool UIronboundTrajectoryLibrary::
 }
 
 
-float UIronboundTrajectoryLibrary::EvaluateScoredContact(
+float UCombatTrajectoryLibrary::EvaluateScoredContact(
 	const FBladeTrajectory& Trajectory,
 	const FTransform& RootTransform,
 	USkeletalMeshComponent* VictimMesh,
@@ -809,9 +809,9 @@ float UIronboundTrajectoryLibrary::EvaluateScoredContact(
 		const FName RegionName =
 			Pair.Key;
 
-		const FIronboundCombatTargetRow* Row =
+		const FCombatTargetRow* Row =
 			reinterpret_cast<
-				const FIronboundCombatTargetRow*>(
+				const FCombatTargetRow*>(
 					Pair.Value);
 
 		if (!Row ||
@@ -949,7 +949,7 @@ float UIronboundTrajectoryLibrary::EvaluateScoredContact(
 }
 
 
-bool UIronboundTrajectoryLibrary::SolveAttackAlignment(
+bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 	USkeletalMeshComponent* AttackerMesh,
 	USkeletalMeshComponent* VictimMesh,
 	const FBladeTrajectory& Trajectory,

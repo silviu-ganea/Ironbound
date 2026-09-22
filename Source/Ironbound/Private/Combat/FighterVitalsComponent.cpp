@@ -1,7 +1,7 @@
 #include "Combat/FighterVitalsComponent.h"
 
 #include "Combat/FighterComponent.h"
-#include "Combat/IronboundCombatFocusComponent.h"
+#include "Combat/CombatFocusComponent.h"
 #include "GameFramework/Actor.h"
 
 UFighterVitalsComponent::UFighterVitalsComponent()
@@ -37,11 +37,12 @@ int32 UFighterVitalsComponent::GetOwnerFighterTeam() const
 	}
 
 	// Compatibility bridge. Until the battle-manager registration path has populated
-	// FighterComponent, the live side is still the one CombatFocus was initialized with -
-	// the same value the Blueprint hit validation used to read off the actor.
-	if (const UIronboundCombatFocusComponent* Focus = Owner->FindComponentByClass<UIronboundCombatFocusComponent>())
+	// FighterComponent, the live side is still the one the pawn was initialized with -
+	// read through the focus component, which now derives its team from FighterComponent
+	// (single team source).
+	if (const UCombatFocusComponent* Focus = Owner->FindComponentByClass<UCombatFocusComponent>())
 	{
-		return Focus->Team;
+		return Focus->GetTeamId();
 	}
 
 	return 0;

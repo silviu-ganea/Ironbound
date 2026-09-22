@@ -2,7 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataTable.h"
-#include "IronboundCombatTarget.generated.h"
+#include "CombatTarget.generated.h"
 
 /**
  * One anatomical target region that the combat solver may try to hit.
@@ -11,7 +11,7 @@
  * It does NOT represent damage.
  */
 USTRUCT(BlueprintType)
-struct IRONBOUND_API FIronboundCombatTargetRow : public FTableRowBase
+struct IRONBOUND_API FCombatTargetRow : public FTableRowBase
 {
 	GENERATED_BODY()
 

@@ -1,6 +1,7 @@
-#include "Combat/IronboundEquipmentComponent.h"
+#include "Combat/CombatEquipmentComponent.h"
 
-#include "Combat/IronboundCombatExecutionComponent.h"
+#include "Combat/CombatExecutionComponent.h"
+#include "Combat/WeaponDefinition.h"
 
 #include "Animation/AnimSequenceBase.h"
 #include "Components/PrimitiveComponent.h"
@@ -10,7 +11,7 @@
 #include "PhysicsEngine/BodyInstance.h"
 #include "Ironbound.h"
 
-bool UIronboundEquipmentComponent::InitializeEquipment(
+bool UCombatEquipmentComponent::InitializeEquipment(
 	USkeletalMeshComponent* InFighterMesh,
 	UStaticMeshComponent* InWeapon,
 	UPhysicsConstraintComponent* InConstraint)
@@ -22,8 +23,8 @@ bool UIronboundEquipmentComponent::InitializeEquipment(
 	return EquipWeapon(Definition);
 }
 
-bool UIronboundEquipmentComponent::EquipWeapon(
-	UIronboundWeaponDefinition* NewDefinition)
+bool UCombatEquipmentComponent::EquipWeapon(
+	UWeaponDefinition* NewDefinition)
 {
 	if (!FighterMesh ||
 		!Weapon ||
@@ -36,14 +37,14 @@ bool UIronboundEquipmentComponent::EquipWeapon(
 	}
 
 	if (auto* Execution =
-		GetOwner()->FindComponentByClass<UIronboundCombatExecutionComponent>())
+		GetOwner()->FindComponentByClass<UCombatExecutionComponent>())
 	{
 		if (Execution->IsCommitted())
 		{
 			return false;
 		}
 
-		Execution->CancelAttack();
+		Execution->CancelActiveExecutions();
 	}
 
 	Constraint->BreakConstraint();
@@ -127,17 +128,17 @@ bool UIronboundEquipmentComponent::EquipWeapon(
 	return true;
 }
 
-bool UIronboundEquipmentComponent::UnequipWeapon()
+bool UCombatEquipmentComponent::UnequipWeapon()
 {
 	if (auto* Execution =
-		GetOwner()->FindComponentByClass<UIronboundCombatExecutionComponent>())
+		GetOwner()->FindComponentByClass<UCombatExecutionComponent>())
 	{
 		if (Execution->IsCommitted())
 		{
 			return false;
 		}
 
-		Execution->CancelAttack();
+		Execution->CancelActiveExecutions();
 	}
 
 	if (Constraint)
@@ -160,13 +161,13 @@ bool UIronboundEquipmentComponent::UnequipWeapon()
 	return true;
 }
 
-void UIronboundEquipmentComponent::InvalidateTrajectories()
+void UCombatEquipmentComponent::InvalidateTrajectories()
 {
 	Trajectories.Reset();
 	++Revision;
 }
 
-bool UIronboundEquipmentComponent::IsBodyContact(
+bool UCombatEquipmentComponent::IsBodyContact(
 	UPrimitiveComponent* OtherComp) const
 {
 	if (!OtherComp)
@@ -180,14 +181,14 @@ bool UIronboundEquipmentComponent::IsBodyContact(
 		return false;
 	}
 
-	const UIronboundEquipmentComponent* OtherEquipment =
-		OtherActor->FindComponentByClass<UIronboundEquipmentComponent>();
+	const UCombatEquipmentComponent* OtherEquipment =
+		OtherActor->FindComponentByClass<UCombatEquipmentComponent>();
 
 	return OtherEquipment &&
 		   OtherEquipment->GetFighterMesh() == OtherComp;
 }
 
-bool UIronboundEquipmentComponent::IsBladeContact(
+bool UCombatEquipmentComponent::IsBladeContact(
 	AActor* OtherActor,
 	UPrimitiveComponent* OtherComp) const
 {
@@ -198,15 +199,15 @@ bool UIronboundEquipmentComponent::IsBladeContact(
 		return false;
 	}
 
-	const UIronboundEquipmentComponent* OtherEquipment =
-		OtherActor->FindComponentByClass<UIronboundEquipmentComponent>();
+	const UCombatEquipmentComponent* OtherEquipment =
+		OtherActor->FindComponentByClass<UCombatEquipmentComponent>();
 
 	return OtherEquipment &&
 		   OtherEquipment->bReady &&
 		   OtherEquipment->GetWeapon() == OtherComp;
 }
 
-void UIronboundEquipmentComponent::NotifyBladeContact(
+void UCombatEquipmentComponent::NotifyBladeContact(
 	AActor* OtherActor,
 	const FHitResult& Hit)
 {
@@ -224,7 +225,7 @@ void UIronboundEquipmentComponent::NotifyBladeContact(
 		*Hit.ImpactPoint.ToCompactString());
 }
 
-bool UIronboundEquipmentComponent::GetTrajectory(
+bool UCombatEquipmentComponent::GetTrajectory(
 	UAnimSequenceBase* Sequence,
 	FBladeTrajectory& OutTrajectory)
 {
@@ -253,7 +254,7 @@ bool UIronboundEquipmentComponent::GetTrajectory(
 		return OutTrajectory.bValid;
 	}
 
-	if (!UIronboundTrajectoryLibrary::BuildBladeTrajectoryWithGrip(
+	if (!UCombatTrajectoryLibrary::BuildBladeTrajectoryWithGrip(
 			FighterMesh,
 			Weapon,
 			Sequence,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameplayTagContainer.h"
 #include "FighterTypes.generated.h"
 
 /**
@@ -30,21 +31,44 @@ struct IRONBOUND_API FFighterAttributes
 /**
  * A skill this fighter has learned.
  *
- * SkillId is a stable identifier, never a display name: it matches the row name in
- * DT_AttackMasterMoves (for example "Attack_001"). Renaming a move's DisplayName or
- * moving its montage therefore cannot break a saved loadout.
+ * A skill is fighter KNOWLEDGE ("this fighter knows OverheadStrike / Thrust /
+ * Parry"). It is not a combat action and not a technique row: techniques are
+ * separate ids in DT_CombatTechniques whose RequiredSkills reference these
+ * skill ids. The old accidental identity (Attack_001 being both the learned
+ * skill and the attack row) is deliberately not preserved.
  */
 USTRUCT(BlueprintType)
 struct IRONBOUND_API FLearnedSkill
 {
 	GENERATED_BODY()
 
-	/** Stable skill identifier; the row name of the move in the attack master table. */
+	/** Stable skill identifier (an id, never a display name). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter|Skills")
 	FName SkillId;
 
 	/** Mastery of the skill. 0 means learned but unpractised. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter|Skills", meta=(ClampMin="0.0"))
+	float Proficiency = 0.f;
+};
+
+/**
+ * Weapon proficiency: how practiced the fighter is with one weapon family.
+ *
+ * Belongs to the FIGHTER, never to the weapon: owning or equipping a weapon
+ * must not grant techniques. Technique availability combines the battle
+ * repertoire, learned skills, these proficiencies and the current equipment.
+ */
+USTRUCT(BlueprintType)
+struct IRONBOUND_API FFighterWeaponProficiency
+{
+	GENERATED_BODY()
+
+	/** Weapon family this proficiency applies to (Weapon.Family.* tag). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter|Skills")
+	FGameplayTag FamilyTag;
+
+	/** Mastery with this family. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter|Skills", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float Proficiency = 0.f;
 };
 
@@ -72,6 +96,10 @@ struct IRONBOUND_API FFighter
 	/** Everything the fighter has learned. Only a subset of this is taken into battle. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter")
 	TArray<FLearnedSkill> LearnedSkills;
+
+	/** Per-weapon-family practice. Weapon ownership does not grant techniques. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter")
+	TArray<FFighterWeaponProficiency> WeaponProficiencies;
 };
 
 /**

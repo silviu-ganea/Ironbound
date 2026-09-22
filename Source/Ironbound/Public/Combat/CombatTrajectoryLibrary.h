@@ -1,11 +1,11 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+﻿// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 
-#include "IronboundTrajectoryLibrary.generated.h"
+#include "CombatTrajectoryLibrary.generated.h"
 
 class UAnimSequenceBase;
 class UDataTable;
@@ -106,7 +106,7 @@ struct FBladeTrajectory
  * are analyzer/solver policy, not per-move authored data.
  */
 UCLASS()
-class IRONBOUND_API UIronboundTrajectoryLibrary : public UBlueprintFunctionLibrary
+class IRONBOUND_API UCombatTrajectoryLibrary : public UBlueprintFunctionLibrary
 {
 	GENERATED_BODY()
 

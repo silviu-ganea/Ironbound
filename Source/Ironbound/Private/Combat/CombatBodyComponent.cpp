@@ -1,8 +1,8 @@
-#include "Combat/IronboundCombatBodyComponent.h"
+﻿#include "Combat/CombatBodyComponent.h"
 
-#include "Combat/IronboundEquipmentComponent.h"
+#include "Combat/CombatEquipmentComponent.h"
 
-#include "Combat/IronboundCombatFocusComponent.h"
+#include "Combat/FighterComponent.h"
 
 #include "Components/SkeletalMeshComponent.h"
 
@@ -58,7 +58,7 @@ namespace
 
 
 
-UIronboundCombatBodyComponent::UIronboundCombatBodyComponent()
+UCombatBodyComponent::UCombatBodyComponent()
 
 {
 
@@ -76,7 +76,7 @@ UIronboundCombatBodyComponent::UIronboundCombatBodyComponent()
 
 
 
-void FIronboundBodyPostPhysicsTick::ExecuteTick(
+void FCombatBodyPostPhysicsTick::ExecuteTick(
 
     float DeltaTime,
 
@@ -100,7 +100,7 @@ void FIronboundBodyPostPhysicsTick::ExecuteTick(
 
 
 
-void UIronboundCombatBodyComponent::RegisterComponentTickFunctions(bool bRegister)
+void UCombatBodyComponent::RegisterComponentTickFunctions(bool bRegister)
 
 {
 
@@ -130,7 +130,7 @@ void UIronboundCombatBodyComponent::RegisterComponentTickFunctions(bool bRegiste
 
 
 
-bool UIronboundCombatBodyComponent::InitializeBody(
+bool UCombatBodyComponent::InitializeBody(
 
     USkeletalMeshComponent* Mesh,
 
@@ -334,7 +334,7 @@ bool UIronboundCombatBodyComponent::InitializeBody(
 
 
 
-void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
+void UCombatBodyComponent::UpdateJointLimits(bool bRestore)
 
 {
 
@@ -422,7 +422,7 @@ void UIronboundCombatBodyComponent::UpdateJointLimits(bool bRestore)
 
 
 
-void UIronboundCombatBodyComponent::UpdateWeaponDrives()
+void UCombatBodyComponent::UpdateWeaponDrives()
 
 {
 
@@ -498,7 +498,7 @@ void UIronboundCombatBodyComponent::UpdateWeaponDrives()
 
 
 
-void UIronboundCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
+void UCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
 
 {
 
@@ -518,7 +518,7 @@ void UIronboundCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
 
 
 
-void UIronboundCombatBodyComponent::SetParryGripDrive(bool bEnabled)
+void UCombatBodyComponent::SetParryGripDrive(bool bEnabled)
 
 {
 
@@ -526,7 +526,7 @@ void UIronboundCombatBodyComponent::SetParryGripDrive(bool bEnabled)
 
         GetOwner()
 
-            ? GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>()
+            ? GetOwner()->FindComponentByClass<UCombatEquipmentComponent>()
 
             : nullptr;
 
@@ -708,7 +708,7 @@ void UIronboundCombatBodyComponent::SetParryGripDrive(bool bEnabled)
 
 
 
-void UIronboundCombatBodyComponent::BeginParryBrace()
+void UCombatBodyComponent::BeginParryBrace()
 
 {
 
@@ -768,7 +768,7 @@ void UIronboundCombatBodyComponent::BeginParryBrace()
 
 
 
-void UIronboundCombatBodyComponent::EndParryBrace()
+void UCombatBodyComponent::EndParryBrace()
 
 {
 
@@ -818,7 +818,7 @@ void UIronboundCombatBodyComponent::EndParryBrace()
 
 
 
-void UIronboundCombatBodyComponent::UpdateDrives()
+void UCombatBodyComponent::UpdateDrives()
 
 {
 
@@ -862,7 +862,7 @@ void UIronboundCombatBodyComponent::UpdateDrives()
 
 
 
-void UIronboundCombatBodyComponent::ApplyHitReaction(
+void UCombatBodyComponent::ApplyHitReaction(
 
     UPrimitiveComponent* Weapon,
 
@@ -880,19 +880,19 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 
 
 
-    const auto* Focus = GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>();
+    const auto* Focus = GetOwner()
+        ? GetOwner()->FindComponentByClass<UFighterComponent>()
+        : nullptr;
 
     const auto* Attacker = Weapon->GetOwner()
-
-        ? Weapon->GetOwner()->FindComponentByClass<UIronboundCombatFocusComponent>()
-
+        ? Weapon->GetOwner()->FindComponentByClass<UFighterComponent>()
         : nullptr;
 
 
 
-    if (!Focus || !Attacker || Focus->Team <= 0 || Attacker->Team <= 0 ||
+    if (!Focus || !Attacker || Focus->GetBattleTeamId() <= 0 || Attacker->GetBattleTeamId() <= 0 ||
 
-        Focus->Team == Attacker->Team)
+        Focus->GetBattleTeamId() == Attacker->GetBattleTeamId())
 
     {
 
@@ -984,7 +984,7 @@ void UIronboundCombatBodyComponent::ApplyHitReaction(
 
 
 
-void UIronboundCombatBodyComponent::ReleaseForDeath()
+void UCombatBodyComponent::ReleaseForDeath()
 
 {
 
@@ -1026,7 +1026,7 @@ void UIronboundCombatBodyComponent::ReleaseForDeath()
 
 
 
-void UIronboundCombatBodyComponent::TickComponent(
+void UCombatBodyComponent::TickComponent(
 
     float DeltaTime,
 
@@ -1078,7 +1078,7 @@ void UIronboundCombatBodyComponent::TickComponent(
 
 
 
-void UIronboundCombatBodyComponent::MeasureTracking()
+void UCombatBodyComponent::MeasureTracking()
 
 {
 
@@ -1092,7 +1092,7 @@ void UIronboundCombatBodyComponent::MeasureTracking()
 
 
 
-    const auto* Equipment = GetOwner()->FindComponentByClass<UIronboundEquipmentComponent>();
+    const auto* Equipment = GetOwner()->FindComponentByClass<UCombatEquipmentComponent>();
 
     if (!Equipment || !Equipment->bReady || !Equipment->Definition || !Equipment->GetWeapon())
 
@@ -1146,7 +1146,7 @@ void UIronboundCombatBodyComponent::MeasureTracking()
 
 
 
-bool UIronboundCombatBodyComponent::BindExistingBody(
+bool UCombatBodyComponent::BindExistingBody(
     USkeletalMeshComponent* Mesh,
     UPhysicsControlComponent* Controls)
 {

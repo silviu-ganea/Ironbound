@@ -6,12 +6,18 @@
 #include "IronboundPawnSkillsetComponent.generated.h"
 
 /**
- * Per-fighter combat capabilities.
+ * DEPRECATED legacy loadout (AttackMoves into DT_AttackMasterMoves).
  *
- * AttackMoves contains references into the global attack master table.
- * The actual move data remains owned by DT_AttackMasterMoves.
+ * Fighter knowledge now lives on UFighterComponent (LearnedSkills /
+ * WeaponProficiencies); battle technique selection lives in
+ * UFighterComponent::BattleRepertoire (technique ids into DT_CombatTechniques).
+ *
+ * Kept only so assets holding an instance (pawn SCS component, level
+ * instances) keep loading before the manual Blueprint cleanup. It has no
+ * behavior. After the pawn BP drops this component, delete this class
+ * entirely.
  */
-UCLASS(ClassGroup=(Ironbound), meta=(BlueprintSpawnableComponent))
+UCLASS(ClassGroup=(Combat), meta=(BlueprintSpawnableComponent, DeprecatedProperty))
 class IRONBOUND_API UIronboundPawnSkillsetComponent : public UActorComponent
 {
 	GENERATED_BODY()
@@ -19,24 +25,20 @@ class IRONBOUND_API UIronboundPawnSkillsetComponent : public UActorComponent
 public:
 	UIronboundPawnSkillsetComponent();
 
-	/** Attacks this fighter currently knows/can use. */
+	/** Deprecated: old attack-row loadout; superseded by the battle repertoire. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Combat|Loadout")
 	TArray<FDataTableRowHandle> AttackMoves;
 
-	/** Whether this fighter is currently allowed to attempt parries. */
+	/** Deprecated: always dead; parry is now requested like any technique. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Loadout")
 	bool bCanParry = false;
 
-	UFUNCTION(BlueprintPure, Category="Ironbound|Combat|Loadout")
+	UFUNCTION(BlueprintPure, Category="Deprecated")
 	bool HasAttacks() const;
 
-	UFUNCTION(BlueprintPure, Category="Ironbound|Combat|Loadout")
+	UFUNCTION(BlueprintPure, Category="Deprecated")
 	int32 GetAttackCount() const;
 
-	/**
-	 * Gets one attack reference by index.
-	 * Returns false if the index is invalid or the row handle is incomplete.
-	 */
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat|Loadout")
+	UFUNCTION(BlueprintCallable, Category="Deprecated")
 	bool GetAttack(int32 Index, FDataTableRowHandle& OutAttack) const;
 };

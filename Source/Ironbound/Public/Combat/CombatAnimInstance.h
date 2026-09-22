@@ -1,12 +1,12 @@
-#pragma once
+﻿#pragma once
 
 #include "CoreMinimal.h"
 #include "Animation/AnimInstance.h"
-#include "IronboundCombatAnimInstance.generated.h"
+#include "CombatAnimInstance.generated.h"
 
 /** Game-thread combat snapshot consumed by the AnimGraph. */
 UCLASS(Transient, Blueprintable)
-class IRONBOUND_API UIronboundCombatAnimInstance : public UAnimInstance
+class IRONBOUND_API UCombatAnimInstance : public UAnimInstance
 {
     GENERATED_BODY()
 

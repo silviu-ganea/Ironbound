@@ -2,48 +2,22 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
-#include "Engine/DataAsset.h"
-#include "Combat/IronboundTrajectoryLibrary.h"
-#include "IronboundEquipmentComponent.generated.h"
+#include "Combat/CombatTrajectoryLibrary.h"
+#include "CombatEquipmentComponent.generated.h"
 
 class UPhysicsConstraintComponent;
 class UPrimitiveComponent;
-
-/** Authored weapon geometry; never inferred from a running physics simulation. */
-UCLASS(BlueprintType)
-class IRONBOUND_API UIronboundWeaponDefinition : public UDataAsset
-{
-	GENERATED_BODY()
-
-public:
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
-	TObjectPtr<UStaticMesh> Mesh;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
-	FName HandBone = TEXT("hand_r");
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
-	FTransform WeaponToHand;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
-	FVector BladeBase = FVector::ZeroVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
-	FVector BladeTip = FVector::ZeroVector;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon", meta=(ClampMin="0.01"))
-	float MassKg = 2.5f;
-};
+class UWeaponDefinition;
 
 /** Owns equip/unequip, weapon contact classification, and intended-trajectory cache. */
-UCLASS(ClassGroup=(Ironbound), meta=(BlueprintSpawnableComponent))
-class IRONBOUND_API UIronboundEquipmentComponent : public UActorComponent
+UCLASS(ClassGroup=(Combat), meta=(BlueprintSpawnableComponent))
+class IRONBOUND_API UCombatEquipmentComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Equipment")
-	TObjectPtr<UIronboundWeaponDefinition> Definition;
+	TObjectPtr<UWeaponDefinition> Definition;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Equipment")
 	int32 Revision = 0;
@@ -51,31 +25,31 @@ public:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Equipment")
 	bool bReady = false;
 
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Equipment")
+	UFUNCTION(BlueprintCallable, Category="Combat|Equipment")
 	bool InitializeEquipment(
 		USkeletalMeshComponent* InFighterMesh,
 		UStaticMeshComponent* InWeapon,
 		UPhysicsConstraintComponent* InConstraint);
 
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Equipment")
-	bool EquipWeapon(UIronboundWeaponDefinition* NewDefinition);
+	UFUNCTION(BlueprintCallable, Category="Combat|Equipment")
+	bool EquipWeapon(UWeaponDefinition* NewDefinition);
 
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Equipment")
+	UFUNCTION(BlueprintCallable, Category="Combat|Equipment")
 	bool UnequipWeapon();
 
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Equipment")
+	UFUNCTION(BlueprintCallable, Category="Combat|Equipment")
 	void InvalidateTrajectories();
 
 	/** True only when OtherComp is the opponent's skeletal body mesh. */
-	UFUNCTION(BlueprintPure, Category="Ironbound|Equipment|Contact")
+	UFUNCTION(BlueprintPure, Category="Combat|Equipment|Contact")
 	bool IsBodyContact(UPrimitiveComponent* OtherComp) const;
 
 	/** True only when OtherComp is the equipped weapon component of OtherActor. */
-	UFUNCTION(BlueprintPure, Category="Ironbound|Equipment|Contact")
+	UFUNCTION(BlueprintPure, Category="Combat|Equipment|Contact")
 	bool IsBladeContact(AActor* OtherActor, UPrimitiveComponent* OtherComp) const;
 
 	/** Records a sword-on-sword contact. This intentionally does not apply damage. */
-	UFUNCTION(BlueprintCallable, Category="Ironbound|Equipment|Contact")
+	UFUNCTION(BlueprintCallable, Category="Combat|Equipment|Contact")
 	void NotifyBladeContact(AActor* OtherActor, const FHitResult& Hit);
 
 	/**
