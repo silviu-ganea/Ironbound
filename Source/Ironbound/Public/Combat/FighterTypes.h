@@ -90,6 +90,6 @@ struct IRONBOUND_API FBattleTeam
 	int32 TeamId = 0;
 
 	/** Spawned fighter actors currently on this team, added uniquely. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Battle")
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Battle")
 	TArray<TObjectPtr<AActor>> Fighters;
 };

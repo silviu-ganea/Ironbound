@@ -27,7 +27,7 @@ public:
 	ABattleManager();
 
 	/** Every team known to this battle. Teams are created on demand by RegisterFighter. */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Battle")
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category="Battle")
 	TArray<FBattleTeam> Teams;
 
 	/**
