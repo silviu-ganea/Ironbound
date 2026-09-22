@@ -123,7 +123,7 @@ public:
 	virtual bool GetHandTarget(FTransform& OutHandTarget) const override;
 
 protected:
-	virtual bool OnInitialize(const FCombatTechniqueRequest& Request) override;
+	virtual bool OnInitialize(const FCombatTechniqueRequest& InRequest) override;
 	virtual void OnTick(float DeltaTime) override;
 	virtual void OnFinish() override;
 
@@ -136,6 +136,9 @@ private:
 	};
 
 	const UExecConfig_ProceduralParry* ParryConfig() const;
+	FName ResolveUpperArmBone() const;
+	FName ResolveLowerArmBone() const;
+	FName ResolveHandBone() const;
 
 	// ===== Solver (migrated verbatim from the retired parry component) =====
 
@@ -199,7 +202,7 @@ private:
 	FParryCandidate ActiveParryCandidate;
 	FTransform ExecutedHandTransform = FTransform::Identity;
 
-	FParryDiagnostics LastDiagnostics;
+	mutable FParryDiagnostics LastDiagnostics;
 	FParryPolicy Policy;
 
 	float UpperArmLength = 0.f;

@@ -1,6 +1,8 @@
 #include "Combat/CombatEquipmentComponent.h"
 
 #include "Combat/CombatExecutionComponent.h"
+#include "Combat/CombatRigDefinition.h"
+#include "Combat/FighterComponent.h"
 #include "Combat/WeaponDefinition.h"
 
 #include "Animation/AnimSequenceBase.h"
@@ -11,6 +13,40 @@
 #include "PhysicsEngine/BodyInstance.h"
 #include "Ironbound.h"
 
+void UCombatEquipmentComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	AActor* Owner = GetOwner();
+	if (!Owner || !Definition)
+	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("Equipment: %s has no owner or weapon definition"), *GetNameSafe(Owner));
+		return;
+	}
+
+	USkeletalMeshComponent* Mesh = Owner->FindComponentByClass<USkeletalMeshComponent>();
+	UPhysicsConstraintComponent* WeaponConstraint = Owner->FindComponentByClass<UPhysicsConstraintComponent>();
+	UStaticMeshComponent* WeaponComponent = nullptr;
+	TArray<UStaticMeshComponent*> StaticMeshes;
+	Owner->GetComponents<UStaticMeshComponent>(StaticMeshes);
+	for (UStaticMeshComponent* Candidate : StaticMeshes)
+	{
+		if (Candidate && (!Definition->Mesh || Candidate->GetStaticMesh() == Definition->Mesh))
+		{
+			WeaponComponent = Candidate;
+			break;
+		}
+	}
+
+	if (!InitializeEquipment(Mesh, WeaponComponent, WeaponConstraint))
+	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("Equipment: automatic initialization failed for %s; check mesh, weapon, constraint, and definition"),
+			*GetNameSafe(Owner));
+	}
+}
+
 bool UCombatEquipmentComponent::InitializeEquipment(
 	USkeletalMeshComponent* InFighterMesh,
 	UStaticMeshComponent* InWeapon,
@@ -19,8 +55,103 @@ bool UCombatEquipmentComponent::InitializeEquipment(
 	FighterMesh = InFighterMesh;
 	Weapon = InWeapon;
 	Constraint = InConstraint;
+	if (ActiveGripId.IsNone() && Definition && !Definition->Grips.IsEmpty())
+	{
+		ActiveGripId = Definition->Grips[0].GripId;
+	}
 
 	return EquipWeapon(Definition);
+}
+
+const FWeaponGrip* UCombatEquipmentComponent::GetActiveGrip() const
+{
+	if (!Definition || Definition->Grips.IsEmpty())
+	{
+		return nullptr;
+	}
+
+	if (!ActiveGripId.IsNone())
+	{
+		if (const FWeaponGrip* Grip = Definition->FindGrip(ActiveGripId))
+		{
+			return Grip;
+		}
+	}
+
+	return &Definition->Grips[0];
+}
+
+FName UCombatEquipmentComponent::GetHandBone() const
+{
+	if (const FWeaponGrip* Grip = GetActiveGrip())
+	{
+		const UFighterComponent* Fighter = GetOwner()
+			? GetOwner()->FindComponentByClass<UFighterComponent>() : nullptr;
+		if (Fighter && Fighter->RigDefinition)
+		{
+			const FFighterArmRigProfile& Arm = Grip->PrimaryHandSide == EWeaponHandSide::Left
+				? Fighter->RigDefinition->LeftArm : Fighter->RigDefinition->RightArm;
+			if (!Arm.HandBone.IsNone())
+			{
+				return Arm.HandBone;
+			}
+		}
+	}
+	return Definition ? Definition->HandBone : NAME_None;
+}
+
+FName UCombatEquipmentComponent::GetUpperArmBone() const
+{
+	if (const FWeaponGrip* Grip = GetActiveGrip())
+	{
+		const UFighterComponent* Fighter = GetOwner()
+			? GetOwner()->FindComponentByClass<UFighterComponent>() : nullptr;
+		if (Fighter && Fighter->RigDefinition)
+		{
+			return (Grip->PrimaryHandSide == EWeaponHandSide::Left
+				? Fighter->RigDefinition->LeftArm : Fighter->RigDefinition->RightArm).UpperArmBone;
+		}
+	}
+	return NAME_None;
+}
+
+FName UCombatEquipmentComponent::GetLowerArmBone() const
+{
+	if (const FWeaponGrip* Grip = GetActiveGrip())
+	{
+		const UFighterComponent* Fighter = GetOwner()
+			? GetOwner()->FindComponentByClass<UFighterComponent>() : nullptr;
+		if (Fighter && Fighter->RigDefinition)
+		{
+			return (Grip->PrimaryHandSide == EWeaponHandSide::Left
+				? Fighter->RigDefinition->LeftArm : Fighter->RigDefinition->RightArm).LowerArmBone;
+		}
+	}
+	return NAME_None;
+}
+
+FName UCombatEquipmentComponent::GetSupportHandBone() const
+{
+	if (const FWeaponGrip* Grip = GetActiveGrip(); Grip && Grip->bUsesSupportHand)
+	{
+		const UFighterComponent* Fighter = GetOwner()
+			? GetOwner()->FindComponentByClass<UFighterComponent>() : nullptr;
+		if (Fighter && Fighter->RigDefinition)
+		{
+			return (Grip->SupportHandSide == EWeaponHandSide::Left
+				? Fighter->RigDefinition->LeftArm : Fighter->RigDefinition->RightArm).HandBone;
+		}
+	}
+	return NAME_None;
+}
+
+FTransform UCombatEquipmentComponent::GetWeaponToHand() const
+{
+	if (const FWeaponGrip* Grip = GetActiveGrip())
+	{
+		return Grip->WeaponToHand;
+	}
+	return Definition ? Definition->WeaponToHand : FTransform::Identity;
 }
 
 bool UCombatEquipmentComponent::EquipWeapon(
@@ -30,9 +161,30 @@ bool UCombatEquipmentComponent::EquipWeapon(
 		!Weapon ||
 		!Constraint ||
 		!NewDefinition ||
-		!NewDefinition->Mesh ||
-		!FighterMesh->DoesSocketExist(NewDefinition->HandBone))
+		!NewDefinition->Mesh)
 	{
+		return false;
+	}
+
+	const FWeaponGrip* NewGrip = ActiveGripId.IsNone()
+		? (NewDefinition->Grips.IsEmpty() ? nullptr : &NewDefinition->Grips[0])
+		: NewDefinition->FindGrip(ActiveGripId);
+	FName HandBone = NewDefinition->HandBone;
+	if (NewGrip)
+	{
+		const UFighterComponent* Fighter = GetOwner()
+			? GetOwner()->FindComponentByClass<UFighterComponent>() : nullptr;
+		if (Fighter && Fighter->RigDefinition)
+		{
+			HandBone = (NewGrip->PrimaryHandSide == EWeaponHandSide::Left
+				? Fighter->RigDefinition->LeftArm : Fighter->RigDefinition->RightArm).HandBone;
+		}
+	}
+	if (HandBone.IsNone() || !FighterMesh->DoesSocketExist(HandBone))
+	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("Equipment: grip hand bone '%s' is not present on %s"),
+			*HandBone.ToString(), *GetNameSafe(FighterMesh->GetSkeletalMeshAsset()));
 		return false;
 	}
 
@@ -55,15 +207,19 @@ bool UCombatEquipmentComponent::EquipWeapon(
 		FDetachmentTransformRules::KeepWorldTransform);
 
 	Definition = NewDefinition;
+	if (NewGrip)
+	{
+		ActiveGripId = NewGrip->GripId;
+	}
 
 	Weapon->SetStaticMesh(Definition->Mesh);
 	Weapon->SetVisibility(true);
 
 	const FTransform HandWorld =
-		FighterMesh->GetSocketTransform(Definition->HandBone);
+		FighterMesh->GetSocketTransform(HandBone);
 
 	const FTransform WeaponWorld =
-		Definition->WeaponToHand * HandWorld;
+		GetWeaponToHand() * HandWorld;
 
 	Weapon->SetWorldTransform(
 		WeaponWorld,
@@ -92,14 +248,14 @@ bool UCombatEquipmentComponent::EquipWeapon(
 
 	Constraint->SetConstrainedComponents(
 		FighterMesh,
-		Definition->HandBone,
+		HandBone,
 		Weapon,
 		NAME_None);
 
 	Constraint->SetDisableCollision(true);
 
 	if (const FBodyInstance* HandBody =
-		FighterMesh->GetBodyInstance(Definition->HandBone))
+		FighterMesh->GetBodyInstance(HandBone))
 	{
 		Constraint->SetConstraintReferenceFrame(
 			EConstraintFrame::Frame1,
@@ -258,8 +414,8 @@ bool UCombatEquipmentComponent::GetTrajectory(
 			FighterMesh,
 			Weapon,
 			Sequence,
-			Definition->HandBone,
-			Definition->WeaponToHand,
+			GetHandBone(),
+			GetWeaponToHand(),
 			Definition->BladeBase,
 			Definition->BladeTip,
 			OutTrajectory))

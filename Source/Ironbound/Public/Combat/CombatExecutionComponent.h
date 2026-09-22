@@ -146,6 +146,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Combat|Admission", meta=(ClampMin="1"))
 	int32 MaxReactiveExecutions = 1;
 
+	/** Radius of the compatibility strike sweep, in cm. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Combat|Contact", meta=(ClampMin="0.1"))
+	float StrikeSweepRadiusCm = 4.f;
+
 	// =====================================================================
 	// Lifecycle helpers (legacy BP seams + system coordination)
 	// =====================================================================
@@ -209,6 +213,7 @@ private:
 	const FCombatExecutionRecord* FindRecord(int32 RecordId) const;
 	const FCombatExecutionRecord* FindPrimaryDeliberateRecord() const;
 	const FCombatExecutionRecord* FindCommittedStrikeRecord() const;
+	void ResolveStrikeContacts();
 	void BroadcastRequirement();
 
 	UPROPERTY()

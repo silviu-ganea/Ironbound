@@ -31,7 +31,7 @@ public:
 	virtual void OnExternalFinishRequest() override;
 
 protected:
-	virtual bool OnInitialize(const FCombatTechniqueRequest& Request) override;
+	virtual bool OnInitialize(const FCombatTechniqueRequest& InRequest) override;
 	virtual void OnTick(float DeltaTime) override;
 	virtual void OnFinish() override;
 
@@ -62,7 +62,7 @@ private:
 
 	void DrawAttackDebug();
 
-	ESTrikePhase Phase = EStrikePhase::Waiting;
+	EStrikePhase Phase = EStrikePhase::Waiting;
 
 	FCombatEngagementRequirement CachedRequirement;
 

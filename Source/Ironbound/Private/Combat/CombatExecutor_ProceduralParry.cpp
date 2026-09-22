@@ -3,6 +3,7 @@
 #include "Combat/CombatBodyComponent.h"
 #include "Combat/CombatBodyProbes.h"
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/WeaponDefinition.h"
 #include "Combat/CombatTechniqueExecutionConfigs.h"
 #include "Animation/Skeleton.h"
 #include "Animation/AnimInstance.h"
@@ -51,6 +52,39 @@ const UExecConfig_ProceduralParry* UCombatExecutor_ProceduralParry::ParryConfig(
 	return Cast<UExecConfig_ProceduralParry>(Config);
 }
 
+FName UCombatExecutor_ProceduralParry::ResolveUpperArmBone() const
+{
+	if (const UCombatEquipmentComponent* Equipment = GetEquipment())
+	{
+		const FName GripBone = Equipment->GetUpperArmBone();
+		if (!GripBone.IsNone()) return GripBone;
+	}
+	const UExecConfig_ProceduralParry* Cfg = ParryConfig();
+	return Cfg ? Cfg->UpperArmBone : NAME_None;
+}
+
+FName UCombatExecutor_ProceduralParry::ResolveLowerArmBone() const
+{
+	if (const UCombatEquipmentComponent* Equipment = GetEquipment())
+	{
+		const FName GripBone = Equipment->GetLowerArmBone();
+		if (!GripBone.IsNone()) return GripBone;
+	}
+	const UExecConfig_ProceduralParry* Cfg = ParryConfig();
+	return Cfg ? Cfg->LowerArmBone : NAME_None;
+}
+
+FName UCombatExecutor_ProceduralParry::ResolveHandBone() const
+{
+	if (const UCombatEquipmentComponent* Equipment = GetEquipment())
+	{
+		const FName GripBone = Equipment->GetHandBone();
+		if (!GripBone.IsNone()) return GripBone;
+	}
+	const UExecConfig_ProceduralParry* Cfg = ParryConfig();
+	return Cfg ? Cfg->HandBone : NAME_None;
+}
+
 // ============================================================================
 // Arm anatomy
 // ============================================================================
@@ -63,9 +97,9 @@ bool UCombatExecutor_ProceduralParry::CalculateArmDimensions()
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	if (!LocalConfig) return false;
 
-	const int32 UpperArmIndex = Mesh->GetBoneIndex(LocalConfig->UpperArmBone);
-	const int32 LowerArmIndex = Mesh->GetBoneIndex(LocalConfig->LowerArmBone);
-	const int32 HandIndex = Mesh->GetBoneIndex(LocalConfig->HandBone);
+	const int32 UpperArmIndex = Mesh->GetBoneIndex(ResolveUpperArmBone());
+	const int32 LowerArmIndex = Mesh->GetBoneIndex(ResolveLowerArmBone());
+	const int32 HandIndex = Mesh->GetBoneIndex(ResolveHandBone());
 	if (UpperArmIndex == INDEX_NONE || LowerArmIndex == INDEX_NONE || HandIndex == INDEX_NONE)
 		return false;
 	const FReferenceSkeleton& RefSkeleton = Mesh->GetSkeletalMeshAsset()->GetRefSkeleton();
@@ -185,8 +219,8 @@ FVector UCombatExecutor_ProceduralParry::CalculateReferenceForearmDirection() co
 	USkeletalMeshComponent* Mesh = GetFighterMesh();
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	if (!Mesh || !Mesh->GetSkeletalMeshAsset() || !LocalConfig) return FVector::ForwardVector;
-	const int32 LowerArmIndex = Mesh->GetBoneIndex(LocalConfig->LowerArmBone);
-	const int32 HandIndex = Mesh->GetBoneIndex(LocalConfig->HandBone);
+	const int32 LowerArmIndex = Mesh->GetBoneIndex(ResolveLowerArmBone());
+	const int32 HandIndex = Mesh->GetBoneIndex(ResolveHandBone());
 	if (LowerArmIndex == INDEX_NONE || HandIndex == INDEX_NONE) return FVector::ForwardVector;
 	const FReferenceSkeleton& RefSkeleton = Mesh->GetSkeletalMeshAsset()->GetRefSkeleton();
 	const TArray<FTransform>& RefPose = RefSkeleton.GetRefBonePose();
@@ -212,8 +246,8 @@ FTransform UCombatExecutor_ProceduralParry::CalculateNeutralWristRelationship() 
 	USkeletalMeshComponent* Mesh = GetFighterMesh();
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	if (!Mesh || !Mesh->GetSkeletalMeshAsset() || !LocalConfig) return FTransform::Identity;
-	const int32 LowerArmIndex = Mesh->GetBoneIndex(LocalConfig->LowerArmBone);
-	const int32 HandIndex = Mesh->GetBoneIndex(LocalConfig->HandBone);
+	const int32 LowerArmIndex = Mesh->GetBoneIndex(ResolveLowerArmBone());
+	const int32 HandIndex = Mesh->GetBoneIndex(ResolveHandBone());
 	if (LowerArmIndex == INDEX_NONE || HandIndex == INDEX_NONE) return FTransform::Identity;
 	const FReferenceSkeleton& RefSkeleton = Mesh->GetSkeletalMeshAsset()->GetRefSkeleton();
 	const TArray<FTransform>& RefPose = RefSkeleton.GetRefBonePose();
@@ -429,7 +463,7 @@ bool UCombatExecutor_ProceduralParry::EvaluateCandidate(
 			CurrentWeaponTransform.GetScale3D());
 		// Project convention:
 		// WeaponWorld = WeaponToHand * HandWorld.
-		const FTransform HandTransform = Equipment->Definition->WeaponToHand.Inverse() * WeaponTransform;
+		const FTransform HandTransform = Equipment->GetWeaponToHand().Inverse() * WeaponTransform;
 		const FVector Hand = HandTransform.GetLocation();
 		const FArmExtensionMetrics ExtensionMetrics = CalculateArmExtensionMetrics(
 				ShoulderWorld, Hand, UpperArmLength, ForearmLength);
@@ -488,7 +522,7 @@ bool UCombatExecutor_ProceduralParry::EvaluateCandidate(
 		return false;
 	}
 	USkeletalMeshComponent* Mesh = GetFighterMesh();
-	const FVector CurrentHand = Mesh->GetSocketLocation(LocalConfig->HandBone);
+	const FVector CurrentHand = Mesh->GetSocketLocation(ResolveHandBone());
 	const float HandDistance = FVector::Distance(CurrentHand, Hand);
 	// Only blade-axis reorientation belongs in the tactical blade angular
 	// speed. Axial roll does not alter the interception geometry.
@@ -578,7 +612,7 @@ bool UCombatExecutor_ProceduralParry::FindBestParryCandidate(FParryCandidate& Ou
 	}
 	const float MinFraction = FMath::Clamp(LocalConfig->MinParryBladeFraction, 0.f, 1.f);
 	const float MaxFraction = FMath::Clamp(LocalConfig->MaxParryBladeFraction, MinFraction, 1.f);
-	const FVector Shoulder = Mesh->GetSocketLocation(LocalConfig->UpperArmBone);
+	const FVector Shoulder = Mesh->GetSocketLocation(ResolveUpperArmBone());
 	const FBladeTrajectory& Trajectory = Threat.SourceTrajectory;
 	const FTransform& AttackerTransform = Threat.AttackerTransform;
 	float CurrentSourceTime = Threat.CurrentSourceTime;
@@ -769,7 +803,7 @@ void UCombatExecutor_ProceduralParry::LogDiagnosticsOnce() const
 // ============================================================================
 
 bool UCombatExecutor_ProceduralParry::OnInitialize(
-	const FCombatTechniqueRequest& Request)
+	const FCombatTechniqueRequest& InRequest)
 {
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	if (!LocalConfig)
@@ -779,36 +813,36 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 			Warning,
 			TEXT("ProceduralParry [%s | %s]: row does not use a procedural-parry execution config"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
 
-	if (!Request.ThreatContext.bHasThreat)
+	if (!InRequest.ThreatContext.bHasThreat)
 	{
 		UE_LOG(
 			LogIronboundCombat,
 			Warning,
 			TEXT("ProceduralParry [%s | %s]: request carries no threat context"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
 
-	if (!Request.ThreatContext.Threat.bHasPredictedContact)
+	if (!InRequest.ThreatContext.Threat.bHasPredictedContact)
 	{
 		UE_LOG(
 			LogIronboundCombat,
 			Log,
 			TEXT("ProceduralParry [%s | %s]: incoming blade already intersected defender body"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
 
-	AActor* Attacker = Request.ThreatContext.Threat.Attacker;
+	AActor* Attacker = InRequest.ThreatContext.Threat.Attacker;
 	if (!IsValid(Attacker))
 	{
 		return false;
@@ -822,7 +856,7 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 			Warning,
 			TEXT("ProceduralParry [%s | %s]: no ready equipment"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
@@ -834,7 +868,7 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 			Warning,
 			TEXT("ProceduralParry [%s | %s]: parry anatomy unavailable"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
@@ -856,7 +890,7 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 			Log,
 			TEXT("ProceduralParry [%s | %s]: no parry candidate"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
@@ -1018,7 +1052,7 @@ void UCombatExecutor_ProceduralParry::InitializeExecutionPose()
 	USkeletalMeshComponent* Mesh = GetFighterMesh();
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	if (!Mesh || !LocalConfig) return;
-	ExecutedHandTransform = Mesh->GetSocketTransform(LocalConfig->HandBone, RTS_World);
+	ExecutedHandTransform = Mesh->GetSocketTransform(ResolveHandBone(), RTS_World);
 }
 
 void UCombatExecutor_ProceduralParry::UpdateExecutionPose(float DeltaTime)
@@ -1059,9 +1093,9 @@ void UCombatExecutor_ProceduralParry::DrawAnatomyDebug() const
 	USkeletalMeshComponent* Mesh = GetFighterMesh();
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	if (!Mesh || !LocalConfig) return;
-	const FVector Shoulder = Mesh->GetSocketLocation(LocalConfig->UpperArmBone);
-	const FVector Elbow = Mesh->GetSocketLocation(LocalConfig->LowerArmBone);
-	const FVector Hand = Mesh->GetSocketLocation(LocalConfig->HandBone);
+	const FVector Shoulder = Mesh->GetSocketLocation(ResolveUpperArmBone());
+	const FVector Elbow = Mesh->GetSocketLocation(ResolveLowerArmBone());
+	const FVector Hand = Mesh->GetSocketLocation(ResolveHandBone());
 	DrawDebugSphere(GetWorld(), Shoulder, 4.f, 10, FColor::Cyan, false, 0.f, 0, 1.f);
 	DrawDebugSphere(GetWorld(), Elbow, 4.f, 10, FColor::Yellow, false, 0.f, 0, 1.f);
 	DrawDebugSphere(GetWorld(), Hand, 4.f, 10, FColor::Green, false, 0.f, 0, 1.f);
@@ -1087,7 +1121,7 @@ void UCombatExecutor_ProceduralParry::DrawParrySolutionDebug() const
 		FColor::Cyan, false, 0.f, 0, 6.f);
 	DrawDebugSphere(World, C.ContactPoint, 6.f, 12,
 		FColor::Green, false, 0.f, 0, 2.f);
-	const FVector Shoulder = Mesh->GetSocketLocation(ParryConfig()->UpperArmBone);
+	const FVector Shoulder = Mesh->GetSocketLocation(ResolveUpperArmBone());
 	DrawDebugLine(World, Shoulder, C.RequiredHandPosition,
 		FColor::Orange, false, 0.f, 0, 3.f);
 	DrawDebugSphere(World, ExecutedHandTransform.GetLocation(), 4.f, 10,

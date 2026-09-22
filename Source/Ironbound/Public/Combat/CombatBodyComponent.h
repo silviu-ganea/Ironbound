@@ -30,6 +30,7 @@ class IRONBOUND_API UCombatBodyComponent : public UActorComponent
 
 public:
 	UCombatBodyComponent();
+	virtual void BeginPlay() override;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Tracking")
 	float WeaponTrackingStrength = 60.f;

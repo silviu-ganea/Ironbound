@@ -6,12 +6,26 @@
 #include "Combat/CombatTechniqueExecutionConfigs.h"
 #include "Combat/CombatThreatComponent.h"
 #include "Combat/FighterVitalsComponent.h"
+#include "Combat/FighterComponent.h"
+#include "Combat/CombatReactionComponent.h"
+#include "Combat/CombatInteractionLibrary.h"
+#include "Combat/CombatEquipmentComponent.h"
+#include "Combat/CombatTechniqueRow.h"
 #include "Engine/DataTable.h"
 #include "GameFramework/Actor.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "CollisionQueryParams.h"
+#include "Engine/World.h"
 #include "Ironbound.h"
 
 namespace
 {
+	ECombatExecutionKind ExecutionKind(ECombatTechniqueKind Kind)
+	{
+		return Kind == ECombatTechniqueKind::Reactive
+			? ECombatExecutionKind::Reactive : ECombatExecutionKind::Deliberate;
+	}
+
 	bool IsSameRequirement(
 		const FCombatEngagementRequirement& A,
 		const FCombatEngagementRequirement& B)
@@ -80,7 +94,7 @@ bool UCombatExecutionComponent::RequestTechnique(
 		return false;
 	}
 
-	if (!HasAdmissionSlot(Row->Kind))
+	if (!HasAdmissionSlot(ExecutionKind(Row->Kind)))
 	{
 		UE_LOG(
 			LogIronboundCombat,
@@ -121,7 +135,7 @@ bool UCombatExecutionComponent::RequestTechnique(
 	FCombatExecutionRecord& Record = Executions.AddDefaulted_GetRef();
 	Record.RecordId = NextRecordId++;
 	Record.TechniqueId = Request.TechniqueId;
-	Record.Kind = Row->Kind;
+	Record.Kind = ExecutionKind(Row->Kind);
 	Record.BodyScope = Row->BodyScope;
 	Record.Target = Request.Target;
 	Record.State = ECombatExecutionState::Preparing;
@@ -166,7 +180,7 @@ bool UCombatExecutionComponent::CanExecuteTechnique(
 	const FCombatTechniqueRow* Row = nullptr;
 	FText Reason;
 	return ValidateRequest(Request, Row, Reason) &&
-		   HasAdmissionSlot(Row->Kind);
+		   HasAdmissionSlot(ExecutionKind(Row->Kind));
 }
 
 bool UCombatExecutionComponent::ValidateRequest(
@@ -375,9 +389,16 @@ FVector UCombatExecutionComponent::ResolveOrientationIntent(
 	{
 		if (const AActor* Target = Focus->GetCombatTarget())
 		{
-			const FVector Intent =
+			FVector Intent =
 				(Target->GetActorLocation() - GetOwner()->GetActorLocation())
 					.GetSafeNormal2D();
+			if (const USkeletalMeshComponent* Mesh =
+					GetOwner()->FindComponentByClass<USkeletalMeshComponent>())
+			{
+				const float RootYaw =
+					FMath::UnwindDegrees(Intent.Rotation().Yaw - Mesh->GetRelativeRotation().Yaw);
+				Intent = FRotator(0.f, RootYaw, 0.f).Vector();
+			}
 
 			if (!Intent.IsNearlyZero())
 			{
@@ -687,7 +708,130 @@ void UCombatExecutionComponent::TickComponent(
 		}
 	}
 
+	ResolveStrikeContacts();
+
 	BroadcastRequirement();
+}
+
+void UCombatExecutionComponent::ResolveStrikeContacts()
+{
+	AActor* Attacker = GetOwner();
+	UWorld* World = GetWorld();
+	UCombatTechniqueComponent* Techniques = GetTechniques();
+	if (!Attacker || !World || !Techniques)
+	{
+		return;
+	}
+
+	for (FCombatExecutionRecord& Record : Executions)
+	{
+		if (Record.Kind != ECombatExecutionKind::Deliberate ||
+			Record.State != ECombatExecutionState::Committed ||
+			!Record.bStrikeWindowOpen ||
+			Record.bContactResolved ||
+			!Record.bCommittedTrajectoryValid ||
+			!Record.Target ||
+			!Record.CommittedTrajectory.bValid)
+		{
+			continue;
+		}
+
+		AActor* Defender = Record.Target;
+		UCombatReactionComponent* Reaction =
+			Defender->FindComponentByClass<UCombatReactionComponent>();
+		if (!Reaction || !Reaction->CanReceiveCombatHit())
+		{
+			continue;
+		}
+
+		FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(IronboundStrikeContact), true, Attacker);
+		QueryParams.AddIgnoredActor(Attacker);
+		FHitResult Contact;
+		bool bContactFound = false;
+		const FCollisionShape SweepShape = FCollisionShape::MakeSphere(FMath::Max(0.1f, StrikeSweepRadiusCm));
+
+		for (const FBladeSegment& Segment : Record.CommittedTrajectory.Segments)
+		{
+			const FVector Start = Record.CommittedTransform.TransformPosition(Segment.Base);
+			const FVector End = Record.CommittedTransform.TransformPosition(Segment.Tip);
+			if (World->SweepSingleByChannel(
+				Contact,
+				Start,
+				End,
+				FQuat::Identity,
+				ECC_Pawn,
+				SweepShape,
+				QueryParams) &&
+				Contact.GetActor() == Defender)
+			{
+				bContactFound = true;
+				break;
+			}
+		}
+
+		if (!bContactFound)
+		{
+			continue;
+		}
+
+		Record.bContactResolved = true;
+		const FCombatTechniqueRow* AttackRow = Techniques->FindRow(Record.TechniqueId);
+		FCombatInteraction Interaction;
+		Interaction.Source = Attacker;
+		Interaction.Receiver = Defender;
+		Interaction.SourceTechniqueId = Record.TechniqueId;
+		Interaction.ContactPoint = Contact.ImpactPoint;
+		Interaction.ContactNormal = Contact.ImpactNormal;
+		Interaction.BodyRegion = Contact.BoneName;
+		Interaction.ReceiverComponent = Contact.GetComponent();
+		Interaction.Impulse = Contact.ImpactNormal * Record.CommittedTrajectory.PeakTipSpeed;
+		Interaction.WeaponTipSpeed = Record.CommittedTrajectory.PeakTipSpeed;
+		if (const UCombatEquipmentComponent* Equipment =
+				Attacker->FindComponentByClass<UCombatEquipmentComponent>())
+		{
+			Interaction.SourceComponent = Equipment->GetWeapon();
+		}
+
+		bool bBlocked = false;
+		if (UCombatExecutionComponent* DefenderExecution =
+				Defender->FindComponentByClass<UCombatExecutionComponent>())
+		{
+			for (const FName ActiveId : DefenderExecution->GetActiveTechniqueIds())
+			{
+				const FCombatTechniqueRow* DefensiveRow =
+					DefenderExecution->GetTechniques()->FindRow(ActiveId);
+				if (DefensiveRow && DefensiveRow->Kind == ECombatTechniqueKind::Reactive &&
+					DefensiveRow->bBlocksIncomingStrike)
+				{
+					Interaction.ReceiverTechniqueId = ActiveId;
+					bBlocked = true;
+					break;
+				}
+			}
+		}
+
+		if (bBlocked)
+		{
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("Strike blocked [%s | %s] by [%s | %s]"),
+				*GetNameSafe(Attacker), *Record.TechniqueId.ToString(),
+				*GetNameSafe(Defender), *Interaction.ReceiverTechniqueId.ToString());
+			continue;
+		}
+
+		if (AttackRow)
+		{
+			const FCombatInteractionResult Result =
+				UCombatInteractionLibrary::Resolve(Interaction, Techniques->TechniquesTable);
+			if (Reaction->ReceiveInteraction(Interaction, Result))
+			{
+				UE_LOG(LogIronboundCombat, Log,
+					TEXT("Strike hit [%s | %s -> %s] damage=%.1f"),
+					*GetNameSafe(Attacker), *Record.TechniqueId.ToString(),
+					*GetNameSafe(Defender), Result.Damage);
+			}
+		}
+	}
 }
 
 // ============================================================================
@@ -699,11 +843,22 @@ UCombatTechniqueComponent* UCombatExecutionComponent::GetTechniques()
 	if (UCombatTechniqueComponent* Techniques =
 			GetOwner()->FindComponentByClass<UCombatTechniqueComponent>())
 	{
+		if (!Techniques->TechniquesTable)
+		{
+			if (const UFighterComponent* Fighter = GetOwner()->FindComponentByClass<UFighterComponent>())
+			{
+				Techniques->TechniquesTable = Fighter->CombatSkillsTable;
+			}
+		}
 		return Techniques;
 	}
 
 	UCombatTechniqueComponent* Techniques =
 		NewObject<UCombatTechniqueComponent>(GetOwner());
+	if (const UFighterComponent* Fighter = GetOwner()->FindComponentByClass<UFighterComponent>())
+	{
+		Techniques->TechniquesTable = Fighter->CombatSkillsTable;
+	}
 
 	Techniques->RegisterComponent();
 

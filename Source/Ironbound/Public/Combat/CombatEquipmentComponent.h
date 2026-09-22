@@ -2,12 +2,12 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Combat/WeaponDefinition.h"
 #include "Combat/CombatTrajectoryLibrary.h"
 #include "CombatEquipmentComponent.generated.h"
 
 class UPhysicsConstraintComponent;
 class UPrimitiveComponent;
-class UWeaponDefinition;
 
 /** Owns equip/unequip, weapon contact classification, and intended-trajectory cache. */
 UCLASS(ClassGroup=(Combat), meta=(BlueprintSpawnableComponent))
@@ -16,6 +16,8 @@ class IRONBOUND_API UCombatEquipmentComponent : public UActorComponent
 	GENERATED_BODY()
 
 public:
+	virtual void BeginPlay() override;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Equipment")
 	TObjectPtr<UWeaponDefinition> Definition;
 
@@ -39,6 +41,17 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="Combat|Equipment")
 	void InvalidateTrajectories();
+
+	/** Selected authored grip; empty selects the first profile or legacy grip fields. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Equipment|Grip")
+	FName ActiveGripId = NAME_None;
+
+	const FWeaponGrip* GetActiveGrip() const;
+	FName GetHandBone() const;
+	FName GetUpperArmBone() const;
+	FName GetLowerArmBone() const;
+	FName GetSupportHandBone() const;
+	FTransform GetWeaponToHand() const;
 
 	/** True only when OtherComp is the opponent's skeletal body mesh. */
 	UFUNCTION(BlueprintPure, Category="Combat|Equipment|Contact")

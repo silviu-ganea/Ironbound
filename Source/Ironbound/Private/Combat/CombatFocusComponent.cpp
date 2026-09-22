@@ -1,6 +1,7 @@
 #include "Combat/CombatFocusComponent.h"
 
 #include "Combat/FighterComponent.h"
+#include "Combat/FighterVitalsComponent.h"
 #include "GameFramework/Pawn.h"
 
 UCombatFocusComponent::UCombatFocusComponent()
@@ -42,7 +43,10 @@ bool UCombatFocusComponent::IsEnemy(const AActor* Candidate) const
 	if (!Fighter || Fighter->GetBattleTeamId() <= 0) return false;
 
 	const UFighterComponent* Other = Candidate->FindComponentByClass<UFighterComponent>();
-	return Other && Other->GetBattleTeamId() > 0 && Other->GetBattleTeamId() != Fighter->GetBattleTeamId();
+	const UFighterVitalsComponent* OtherVitals = Candidate->FindComponentByClass<UFighterVitalsComponent>();
+	return Other && Other->GetBattleTeamId() > 0 &&
+		Other->GetBattleTeamId() != Fighter->GetBattleTeamId() &&
+		(!OtherVitals || OtherVitals->IsAlive());
 }
 
 bool UCombatFocusComponent::SetCombatTarget(AActor* Target)

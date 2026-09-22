@@ -1,6 +1,7 @@
-﻿#include "Combat/CombatBodyComponent.h"
+#include "Combat/CombatBodyComponent.h"
 
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/WeaponDefinition.h"
 
 #include "Combat/FighterComponent.h"
 
@@ -9,6 +10,7 @@
 #include "Components/StaticMeshComponent.h"
 
 #include "PhysicsControlComponent.h"
+#include "Components/ActorComponent.h"
 
 #include "PhysicsEngine/PhysicsAsset.h"
 
@@ -72,6 +74,21 @@ UCombatBodyComponent::UCombatBodyComponent()
 
     PostPhysicsTick.TickGroup = TG_PostPhysics;
 
+}
+
+void UCombatBodyComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	AActor* Owner = GetOwner();
+	USkeletalMeshComponent* Mesh = Owner ? Owner->FindComponentByClass<USkeletalMeshComponent>() : nullptr;
+	UPhysicsControlComponent* Controls = Owner ? Owner->FindComponentByClass<UPhysicsControlComponent>() : nullptr;
+	if (!InitializeBody(Mesh, Controls))
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("CombatBody: automatic initialization failed for %s; check skeletal mesh, Physics Asset, and Physics Control component"),
+			*GetNameSafe(Owner));
+	}
 }
 
 
@@ -1106,9 +1123,9 @@ void UCombatBodyComponent::MeasureTracking()
 
     const FTransform AnimatedHand = PhysicsControls->GetCachedBoneTransform(
 
-        FighterMesh, Equipment->Definition->HandBone);
+        FighterMesh, Equipment->GetHandBone());
 
-    const FTransform ActualHand = FighterMesh->GetSocketTransform(Equipment->Definition->HandBone);
+    const FTransform ActualHand = FighterMesh->GetSocketTransform(Equipment->GetHandBone());
 
 
 
@@ -1122,7 +1139,7 @@ void UCombatBodyComponent::MeasureTracking()
 
     const FVector IntendedTip =
 
-        (Equipment->Definition->WeaponToHand * AnimatedHand).TransformPosition(
+        (Equipment->GetWeaponToHand() * AnimatedHand).TransformPosition(
 
             Equipment->Definition->BladeTip);
 
@@ -1136,7 +1153,7 @@ void UCombatBodyComponent::MeasureTracking()
 
     GripTipError = FVector::Distance(
 
-        (Equipment->Definition->WeaponToHand * ActualHand).TransformPosition(
+        (Equipment->GetWeaponToHand() * ActualHand).TransformPosition(
 
             Equipment->Definition->BladeTip),
 

@@ -98,9 +98,25 @@ struct IRONBOUND_API FCombatTechniqueRow : public FTableRowBase
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Technique")
 	FGameplayTag WeaponFamilyTag;
 
+	/** Accepted family tags, when an action supports more than one weapon family. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Technique|Compatibility")
+	FGameplayTagContainer CompatibleWeaponFamilies;
+
+	/** Accepted handling classes such as OneHanded or TwoHanded. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Technique|Compatibility")
+	FGameplayTagContainer CompatibleWeaponClasses;
+
+	/** Minimum family/class proficiency resolved by the equipped weapon profile. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Technique|Compatibility", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float MinimumWeaponProficiency = 0.f;
+
 	/** Deliberate techniques that fight an opponent require an explicit request target. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Technique")
 	bool bRequiresCombatTarget = false;
+
+	/** Whether this reactive technique can intercept an incoming strike for its active duration. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Technique|Defense")
+	bool bBlocksIncomingStrike = false;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Technique")
 	FCombatBodyScope BodyScope;

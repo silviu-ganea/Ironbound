@@ -1,7 +1,9 @@
 #include "Combat/CombatTechniqueComponent.h"
 
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/WeaponDefinition.h"
 #include "Combat/CombatTechniqueRow.h"
+#include "Combat/CombatSkillRow.h"
 #include "Combat/FighterComponent.h"
 #include "Combat/FighterVitalsComponent.h"
 #include "Engine/DataTable.h"
@@ -42,10 +44,11 @@ const FCombatTechniqueRow* UCombatTechniqueComponent::FindRow(FName TechniqueId)
 		return nullptr;
 	}
 
-	return TechniquesTable->FindRow<FCombatTechniqueRow>(
+	const FCombatSkillRow* SkillRow = TechniquesTable->FindRow<FCombatSkillRow>(
 		TechniqueId,
 		TEXT("CombatTechniqueFindRow"),
 		/*bWarnIfRowMissing=*/false);
+	return SkillRow;
 }
 
 void UCombatTechniqueComponent::RebuildCacheIfNeeded() const
@@ -77,8 +80,9 @@ void UCombatTechniqueComponent::RebuildCacheIfNeeded() const
 
 	for (const TPair<FName, uint8*>& Pair : Rows)
 	{
-		const FCombatTechniqueRow* Row =
-			reinterpret_cast<const FCombatTechniqueRow*>(Pair.Value);
+		const FCombatSkillRow* SkillRow =
+			reinterpret_cast<const FCombatSkillRow*>(Pair.Value);
+		const FCombatTechniqueRow* Row = SkillRow;
 
 		if (!Row)
 		{
@@ -127,14 +131,73 @@ bool UCombatTechniqueComponent::IsAvailable(FName TechniqueId) const
 		}
 	}
 
-	// Weapon family requirement: empty means any equipment works.
-	if (Row->WeaponFamilyTag.IsValid())
+	// Filter through authored weapon taxonomy. The action catalog owns
+	// compatibility rules; weapon definitions only provide their tags.
+	if (Row->WeaponFamilyTag.IsValid() ||
+		!Row->CompatibleWeaponFamilies.IsEmpty() ||
+		!Row->CompatibleWeaponClasses.IsEmpty() ||
+		Row->MinimumWeaponProficiency > 0.f)
 	{
 		const UCombatEquipmentComponent* Equipment = GetEquipment();
 		if (!Equipment ||
 			!Equipment->bReady ||
-			!Equipment->Definition ||
-			!Equipment->Definition->FamilyTag.MatchesTag(Row->WeaponFamilyTag))
+			!Equipment->Definition)
+		{
+			return false;
+		}
+
+		const UWeaponDefinition* Weapon = Equipment->Definition;
+		if (Row->WeaponFamilyTag.IsValid() &&
+			(!Weapon->FamilyTag.IsValid() || !Weapon->FamilyTag.MatchesTag(Row->WeaponFamilyTag)))
+		{
+			return false;
+		}
+
+		if (!Row->CompatibleWeaponFamilies.IsEmpty())
+		{
+			bool bFamilyMatch = false;
+			for (const FGameplayTag& RequiredFamily : Row->CompatibleWeaponFamilies)
+			{
+				if (Weapon->FamilyTag.IsValid() && Weapon->FamilyTag.MatchesTag(RequiredFamily))
+				{
+					bFamilyMatch = true;
+					break;
+				}
+			}
+			if (!bFamilyMatch)
+			{
+				return false;
+			}
+		}
+
+		if (!Row->CompatibleWeaponClasses.IsEmpty())
+		{
+			TArray<FGameplayTag> WeaponClasses;
+			Weapon->ClassTags.GetGameplayTagArray(WeaponClasses);
+			bool bClassMatch = false;
+			for (const FGameplayTag& RequiredClass : Row->CompatibleWeaponClasses)
+			{
+				for (const FGameplayTag& WeaponClass : WeaponClasses)
+				{
+					if (WeaponClass.MatchesTag(RequiredClass))
+					{
+						bClassMatch = true;
+						break;
+					}
+				}
+				if (bClassMatch)
+				{
+					break;
+				}
+			}
+			if (!bClassMatch)
+			{
+				return false;
+			}
+		}
+
+		if (Row->MinimumWeaponProficiency > 0.f &&
+			Fighter->GetEffectiveWeaponProficiency(Weapon) < Row->MinimumWeaponProficiency)
 		{
 			return false;
 		}

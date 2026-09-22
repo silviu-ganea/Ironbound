@@ -1,6 +1,7 @@
 #include "Combat/CombatInteractionLibrary.h"
 
 #include "Combat/CombatTechniqueRow.h"
+#include "Combat/CombatSkillRow.h"
 #include "Engine/DataTable.h"
 
 FCombatInteractionResult UCombatInteractionLibrary::Resolve(
@@ -12,7 +13,7 @@ FCombatInteractionResult UCombatInteractionLibrary::Resolve(
 	const FCombatTechniqueRow* Row = nullptr;
 	if (TechniquesTable && !Interaction.SourceTechniqueId.IsNone())
 	{
-		Row = TechniquesTable->FindRow<FCombatTechniqueRow>(
+		Row = TechniquesTable->FindRow<FCombatSkillRow>(
 			Interaction.SourceTechniqueId, TEXT("CombatInteractionResolve"), false);
 	}
 

@@ -419,3 +419,13 @@ UStaticMeshComponent* UCombatThreatComponent::GetAttackerWeapon(AActor* Attacker
 
 	return AttackerEquipment ? AttackerEquipment->GetWeapon() : nullptr;
 }
+
+USkeletalMeshComponent* UCombatThreatComponent::GetFighterMesh() const
+{
+	const AActor* Owner = GetOwner();
+	const UCombatEquipmentComponent* OwnerEquipment = Owner
+		? Owner->FindComponentByClass<UCombatEquipmentComponent>() : nullptr;
+	return OwnerEquipment && OwnerEquipment->GetFighterMesh()
+		? OwnerEquipment->GetFighterMesh()
+		: (Owner ? Owner->FindComponentByClass<USkeletalMeshComponent>() : nullptr);
+}

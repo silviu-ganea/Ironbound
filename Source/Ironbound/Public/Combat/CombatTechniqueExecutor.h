@@ -33,6 +33,7 @@ UCLASS(Abstract)
 class IRONBOUND_API UCombatTechniqueExecutor : public UObject
 {
 	GENERATED_BODY()
+	friend class UCombatExecutionComponent;
 
 public:
 	// ===== Lifecycle (driven by the execution component) =====
@@ -97,7 +98,7 @@ protected:
 	// ===== Strategy hooks =====
 
 	/** Called once after members are set. Return false to reject the execution. */
-	virtual bool OnInitialize(const FCombatTechniqueRequest& Request);
+	virtual bool OnInitialize(const FCombatTechniqueRequest& InRequest);
 
 	/** Called every frame while the record lives. */
 	virtual void OnTick(float DeltaTime);

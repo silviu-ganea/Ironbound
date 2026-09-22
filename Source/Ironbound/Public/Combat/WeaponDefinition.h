@@ -5,6 +5,13 @@
 #include "GameplayTagContainer.h"
 #include "WeaponDefinition.generated.h"
 
+UENUM(BlueprintType)
+enum class EWeaponHandSide : uint8
+{
+	Right,
+	Left
+};
+
 /** One authored hand/grip relationship for this weapon. */
 USTRUCT(BlueprintType)
 struct IRONBOUND_API FWeaponGrip
@@ -15,9 +22,19 @@ struct IRONBOUND_API FWeaponGrip
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon Grip")
 	FName GripId;
 
+	/** Semantic sides resolve through the fighter's rig profile, not hard-coded bone names. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon Grip")
+	EWeaponHandSide PrimaryHandSide = EWeaponHandSide::Right;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon Grip")
+	EWeaponHandSide SupportHandSide = EWeaponHandSide::Left;
+
 	/** Weapon-local to hand-space transform for this grip. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon Grip")
 	FTransform WeaponToHand = FTransform::Identity;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon Grip")
+	bool bUsesSupportHand = false;
 };
 
 /** One authored contact surface of the weapon (strike edge, parry flat, etc.). */
@@ -78,6 +95,17 @@ public:
 	/** Weapon family this tool belongs to (Weapon.Family.Sword, ...). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon|Family")
 	FGameplayTag FamilyTag;
+
+	/** Handling classes (Weapon.Class.*); hierarchical tags allow new classes without code enums. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon|Class")
+	FGameplayTagContainer ClassTags;
+
+	/** Weights combine independent family and class mastery for this weapon archetype. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon|Proficiency", meta=(ClampMin="0.0"))
+	float FamilyProficiencyWeight = 0.5f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon|Proficiency", meta=(ClampMin="0.0"))
+	float ClassProficiencyWeight = 0.5f;
 
 	/** Authored grips. The first entry mirrors the legacy WeaponToHand when authored. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon|Grips")

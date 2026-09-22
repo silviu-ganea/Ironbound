@@ -6,6 +6,7 @@
 #include "FighterComponent.generated.h"
 
 class UDataTable;
+class UCombatRigDefinition;
 
 /**
  * A single fighter: persistent identity plus the runtime state of one battle.
@@ -28,10 +29,19 @@ class IRONBOUND_API UFighterComponent : public UActorComponent
 
 public:
 	UFighterComponent();
+	virtual void BeginPlay() override;
 
 	/** Persistent identity, attributes, learned skills and weapon proficiencies. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter")
 	FFighter FighterData;
+
+	/** Shared learnable/executable action catalog (DT_CombatSkills). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fighter|Skills")
+	TObjectPtr<UDataTable> CombatSkillsTable;
+
+	/** Skeleton anatomy map used by grip-aware procedural executors. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fighter|Rig")
+	TObjectPtr<UCombatRigDefinition> RigDefinition;
 
 	/**
 	 * Mutable per-battle copy of FighterData.Attributes.
@@ -40,22 +50,31 @@ public:
 	FFighterAttributes BattleAttributes;
 
 	/**
-	 * BATTLE REPERTOIRE: the TECHNIQUES selected/prepared for this battle.
+	 * BATTLE REPERTOIRE: the actions selected/prepared for this battle.
 	 *
-	 * Entries are technique ids (row names of DT_CombatTechniques), never
-	 * skill ids. A technique references its RequiredSkills; availability is
-	 * computed by the technique component from this repertoire, the learned
-	 * skills, weapon proficiency and current equipment.
+	 * Entries are action ids (row names of DT_CombatSkills). Availability is
+	 * computed from this repertoire, learned skill ids, weapon proficiency and
+	 * current equipment. Action and learned-skill ids share the same catalog.
 	 */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Fighter|Battle")
 	TArray<FName> BattleRepertoire;
 
-	/**
-	 * Optional reference to DT_CombatTechniques used by SelectBattleTechnique
-	 * to validate a technique's RequiredSkills against the learned skills.
-	 */
+	/** Initial prototype loadout for placed fighters; battle setup can replace it later. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fighter|Battle")
-	TObjectPtr<UDataTable> BattleTechniquesTable;
+	TArray<FName> StartingBattleRepertoire;
+
+	/** Prototype starting side for placed fighters. BattleManager registration overrides this. 0 means unassigned. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Fighter|Battle", meta=(ClampMin="0"))
+	int32 StartingBattleTeamId = 0;
+
+	/**
+	 * Deprecated compatibility field; new fighters use CombatSkillsTable for
+	 * both learned-skill validation and executable action lookup.
+	 */
+	// Kept reflected for loading old serialized values, but intentionally not
+	// exposed to Blueprints; new gameplay uses CombatSkillsTable.
+	UPROPERTY()
+	TObjectPtr<UDataTable> BattleTechniquesTable_DEPRECATED;
 
 	/**
 	 * The subset of the fighter's learned skills selected for the current battle.
@@ -128,6 +147,7 @@ public:
 
 	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
 	float GetWeaponProficiency(const FGameplayTag& FamilyTag, float FallbackProficiency = 0.f) const;
+	float GetEffectiveWeaponProficiency(const class UWeaponDefinition* Weapon) const;
 
 	UFUNCTION(BlueprintPure, Category="Ironbound|Fighter")
 	TArray<FFighterWeaponProficiency> GetWeaponProficiencies() const { return FighterData.WeaponProficiencies; }
@@ -135,10 +155,8 @@ public:
 	// ===== Battle repertoire (techniques) =====
 
 	/**
-	 * Prepares a technique for this battle. Validates the technique's
-	 * RequiredSkills against the learned skills when the technique table is
-	 * available; the technique id must reference DT_CombatTechniques rows, not
-	 * skill rows.
+	 * Prepares an action for this battle. Validates its RequiredSkills against
+	 * learned skills when the shared DT_CombatSkills table is available.
 	 */
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Fighter")
 	bool SelectBattleTechnique(FName TechniqueId);

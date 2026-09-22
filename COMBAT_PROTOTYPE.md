@@ -1,3 +1,22 @@
+## Current handoff state — 2026-09-22
+
+The native Editor target now builds, and `/Game/Blueprints/SandboxCharacter_Mover` compiles with **zero errors and zero warnings**. The Blueprint cleanup removed the old attack trigger and sword-hit damage flow, and removed the obsolete `InitializeFocus` hookup. Death now calls `CombatExecution.CancelActiveExecutions`; body initialization, health/death presentation, weapon/equipment setup, GASP input, traversal, Mover, and the GASP AnimBP remain. No fight has been rewired or tested after this cleanup.
+
+### Legacy behavior to reproduce through the new system
+
+This is a record of the previous prototype path, not the current implementation:
+
+- The old `AttemptAttack` flow selected attack index 0 from `DT_AttackMasterMoves`, resolved the opponent mesh, prepared an attack, then committed it by setting the montage/damage and invoking the `Attack` event. The old event played the montage only when `CombatExecution` allowed an attack.
+- Sword collision was only allowed to apply one hit during that attack. It ignored self-contact, required an opponent fighter, applied `DamagePerHit` with team validation, and requested the victim's physical hit reaction. The victim's health/death flow then hid the bar, unpossessed if applicable, stopped Mover, and ragdolled the body.
+- As described by the project owner, the earlier procedural parry observed an incoming attack, generated a sword/hand interception pose, and used CCDIK to bring the upper body into that pose. Its quality was rough, but the defender could keep attempting parries. Preserve this intended behavior when rebuilding; do not treat the now-empty deprecated `IronboundParryComponent` as its implementation.
+- Pawn0 repeatedly chose the same overhead skill and pursued Pawn1; Pawn1 had no attack skill and only attempted parries. Team 0 was an observer. The goal was autonomous fighting until Pawn0 killed Pawn1.
+
+### Rebuild boundary
+
+Keep the Mover/GASP graph as the movement and animation owner. The AI/controller should submit an attack or parry intention; the technique/execution components should validate and execute it; Mover should continue to consume controller navigation through `NavMover` or player input through the existing input path. Weapon contact, damage, reaction, and death must be explicit combat-system responsibilities. Attack selection must move from the old `DT_AttackMasterMoves` shortcut to the new skill/repertoire/technique definitions, and parry observation/pose generation must be restored in the new threat/executor path. The old attack helper function names remain only as inert Blueprint stubs pending later cleanup; they are not the new gameplay path.
+
+---
+
 ## Combat equipment and attack execution refactor — 2026-09-16
 
 Current implementation details and measured results are in [COMBAT_ARCHITECTURE.md](COMBAT_ARCHITECTURE.md). This section supersedes older descriptions of attack setup and the completed stationary duel; those remain as historical findings.

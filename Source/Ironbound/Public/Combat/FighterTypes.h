@@ -52,7 +52,7 @@ struct IRONBOUND_API FLearnedSkill
 };
 
 /**
- * Weapon proficiency: how practiced the fighter is with one weapon family.
+ * Independent proficiency progress for one weapon-family OR weapon-class tag.
  *
  * Belongs to the FIGHTER, never to the weapon: owning or equipping a weapon
  * must not grant techniques. Technique availability combines the battle
@@ -63,11 +63,11 @@ struct IRONBOUND_API FFighterWeaponProficiency
 {
 	GENERATED_BODY()
 
-	/** Weapon family this proficiency applies to (Weapon.Family.* tag). */
+	/** One Weapon.Family.* or Weapon.Class.* tag; separate records progress independently. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter|Skills")
-	FGameplayTag FamilyTag;
+	FGameplayTag CategoryTag;
 
-	/** Mastery with this family. */
+	/** Mastery with this category. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Fighter|Skills", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float Proficiency = 0.f;
 };

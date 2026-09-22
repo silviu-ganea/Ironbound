@@ -1,8 +1,9 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "Combat/CombatTrajectoryLibrary.h"
 #include "Combat/CombatTarget.h"
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/WeaponDefinition.h"
 
 #include "Animation/AnimSequenceBase.h"
 #include "Components/CapsuleComponent.h"
@@ -305,7 +306,7 @@ bool UCombatTrajectoryLibrary::BuildBladeTrajectory(
 		SwordComponent,
 		Sequence,
 		HandBoneName,
-		Equipment->Definition->WeaponToHand,
+		Equipment->GetWeaponToHand(),
 		BladeBaseLocal,
 		BladeTipLocal,
 		OutTrajectory);
@@ -961,6 +962,33 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 	float& OutPredictedDistance,
 	float& OutTargetScore)
 {
+	return SolveAttackAlignmentWithFacingLimit(
+		AttackerMesh,
+		VictimMesh,
+		Trajectory,
+		CombatTargets,
+		180.f,
+		OutAttackerTransform,
+		OutRegion,
+		OutBone,
+		OutSampleIndex,
+		OutPredictedDistance,
+		OutTargetScore);
+}
+
+bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
+	USkeletalMeshComponent* AttackerMesh,
+	USkeletalMeshComponent* VictimMesh,
+	const FBladeTrajectory& Trajectory,
+	UDataTable* CombatTargets,
+	float MaxFacingDeviationDegrees,
+	FTransform& OutAttackerTransform,
+	FName& OutRegion,
+	FName& OutBone,
+	int32& OutSampleIndex,
+	float& OutPredictedDistance,
+	float& OutTargetScore)
+{
 	OutAttackerTransform =
 		FTransform::Identity;
 
@@ -1045,8 +1073,8 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 					.GetAbsMax()) +
 		GStandoffBeyondReach;
 
-	const float TowardTargetYaw =
-		(-Approach).Rotation().Yaw;
+	const float MeshFacingOffsetYaw = AttackerMesh->GetRelativeRotation().Yaw;
+	const float FacingLimit = FMath::Clamp(MaxFacingDeviationDegrees, 0.f, 180.f);
 
 	bool bFoundFeasible =
 		false;
@@ -1061,11 +1089,11 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 		-TNumericLimits<float>::Max();
 
 	auto Consider =
-		[&](float Yaw, float Distance)
+		[&](const FVector& CandidateApproach, float Yaw, float Distance)
 	{
 		FVector Location =
 			Target +
-			Approach * Distance;
+			CandidateApproach * Distance;
 
 		Location.Z =
 			Origin.Z;
@@ -1100,11 +1128,18 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 			Miss <=
 				GContactToleranceCm;
 
+		const float TowardTargetYaw = FMath::UnwindDegrees(
+			(-CandidateApproach).Rotation().Yaw - MeshFacingOffsetYaw);
 		const float YawDeviation =
 			FMath::Abs(
 				FMath::FindDeltaAngleDegrees(
 					TowardTargetYaw,
 					Yaw));
+
+		if (YawDeviation > FacingLimit)
+		{
+			return;
+		}
 
 		bool bBetter = false;
 
@@ -1124,29 +1159,14 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 						 TargetScore,
 						 BestScore))
 			{
-				/*
-				 * For the same anatomical value, preserve the old
-				 * preference for the furthest useful stand-off.
-				 */
-				if (Distance >
-					BestStandoff + 0.1f)
+				if (YawDeviation < BestYawDeviation - 0.1f)
 				{
 					bBetter = true;
 				}
-				else if (
-					FMath::IsNearlyEqual(
-						Distance,
-						BestStandoff,
-						0.1f) &&
-					(Miss <
-						 OutPredictedDistance -
-							 0.01f ||
-					 (FMath::IsNearlyEqual(
-						  Miss,
-						  OutPredictedDistance,
-						  0.01f) &&
-					  YawDeviation <
-						  BestYawDeviation)))
+				else if (FMath::IsNearlyEqual(YawDeviation, BestYawDeviation, 0.1f) &&
+					(Distance > BestStandoff + 0.1f ||
+					 (FMath::IsNearlyEqual(Distance, BestStandoff, 0.1f) &&
+					  Miss < OutPredictedDistance - 0.01f)))
 				{
 					bBetter = true;
 				}
@@ -1217,15 +1237,29 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 						  float(
 							  GDistanceProbes - 1));
 
-		for (int32 Y = 0;
-			 Y < 72;
-			 ++Y)
+		if (FMath::IsNearlyZero(FacingLimit))
 		{
-			Consider(
-				TowardTargetYaw -
-					180.f +
-					5.f * Y,
-				Distance);
+			// With strict target-facing, vary the stance around the defender
+			// instead of rotating the attacker away from the target. This lets
+			// the solver find the side/range where this animation can connect
+			// while preserving exact facing.
+			for (int32 Angle = 0; Angle < 72; ++Angle)
+			{
+				const float Radians = FMath::DegreesToRadians(5.f * Angle);
+				const FVector CandidateApproach(FMath::Cos(Radians), FMath::Sin(Radians), 0.f);
+				const float FacingYaw = FMath::UnwindDegrees(
+					(-CandidateApproach).Rotation().Yaw - MeshFacingOffsetYaw);
+				Consider(CandidateApproach, FacingYaw, Distance);
+			}
+		}
+		else
+		{
+			const float TargetWorldYaw = (-Approach).Rotation().Yaw;
+			const float TowardTargetYaw = FMath::UnwindDegrees(TargetWorldYaw - MeshFacingOffsetYaw);
+			for (int32 Y = 0; Y < 72; ++Y)
+			{
+				Consider(Approach, TowardTargetYaw - 180.f + 5.f * Y, Distance);
+			}
 		}
 	}
 
@@ -1246,10 +1280,11 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignment(
 		BestStandoff;
 
 	for (int32 Y = -5;
-		 Y <= 5;
+		 Y <= 5 && FacingLimit > KINDA_SMALL_NUMBER;
 		 ++Y)
 	{
 		Consider(
+			Approach,
 			ChosenYaw +
 				float(Y),
 			ChosenDistance);

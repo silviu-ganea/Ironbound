@@ -10,6 +10,7 @@ class UCombatEquipmentComponent;
 class UCombatFocusComponent;
 class UStaticMeshComponent;
 class USkeletalMeshComponent;
+struct FCombatCommittedStrike;
 
 /**
  * Objective combat observation only: measures and exposes incoming-attack

@@ -5,6 +5,9 @@
 #include "CombatTechniqueExecutionConfigs.generated.h"
 
 class UCombatTechniqueExecutor;
+class UAnimMontage;
+class UAnimSequenceBase;
+class UDataTable;
 
 /**
  * Authored executor binding + configuration for one execution strategy.
@@ -51,9 +54,25 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.1"))
 	float FacingTolerance = 3.f;
 
+	/** Maximum planned yaw deviation from directly facing the target; zero requires a direct facing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.0", ClampMax="180.0"))
+	float MaxFacingDeviationFromTargetDegrees = 0.f;
+
 	/** Root speed below which the fighter counts as settled, cm/s. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement")
 	float SettledSpeed = 5.f;
+
+	/** Maximum time allowed to satisfy navigation/alignment before abandoning the request. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="1.0"))
+	float PreparationTimeoutSeconds = 25.f;
+
+	/** Tolerance used by the prototype target-contact solver, cm. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.1"))
+	float ContactToleranceCm = 25.f;
+
+	/** Safety deadline added after the sampled strike interval, seconds. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.0"))
+	float CommitTimeoutExtraSeconds = 2.f;
 
 	/** Recovery duration after the strike finishes, seconds. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.0"))

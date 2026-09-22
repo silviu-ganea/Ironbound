@@ -1,11 +1,31 @@
 #include "Combat/FighterComponent.h"
 
 #include "Combat/CombatTechniqueRow.h"
+#include "Combat/CombatSkillRow.h"
+#include "Combat/WeaponDefinition.h"
 #include "Engine/DataTable.h"
 
 UFighterComponent::UFighterComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
+}
+
+void UFighterComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	BattleAttributes = FighterData.Attributes;
+	if (BattleTeamId == 0 && StartingBattleTeamId > 0)
+	{
+		SetBattleTeamId(StartingBattleTeamId);
+	}
+	if (BattleRepertoire.IsEmpty() && !StartingBattleRepertoire.IsEmpty())
+	{
+		for (const FName TechniqueId : StartingBattleRepertoire)
+		{
+			SelectBattleTechnique(TechniqueId);
+		}
+	}
 }
 
 void UFighterComponent::InitializeFighter(const FFighter& InFighterData)
@@ -40,15 +60,26 @@ bool UFighterComponent::LearnSkill(const FLearnedSkill& Skill)
 	{
 		return false;
 	}
+	if (CombatSkillsTable && !CombatSkillsTable->FindRow<FCombatSkillRow>(
+			Skill.SkillId, TEXT("LearnSkill"), /*bWarnIfRowMissing=*/false))
+	{
+		return false;
+	}
 
 	if (FLearnedSkill* Existing = FighterData.LearnedSkills.FindByPredicate(
 		[&Skill](const FLearnedSkill& Candidate) { return Candidate.SkillId == Skill.SkillId; }))
 	{
+		if (FMath::IsNearlyEqual(Existing->Proficiency, Skill.Proficiency))
+		{
+			return true;
+		}
 		*Existing = Skill;
+		++RepertoireRevision;
 		return true;
 	}
 
 	FighterData.LearnedSkills.Add(Skill);
+	++RepertoireRevision;
 	return true;
 }
 
@@ -79,20 +110,33 @@ bool UFighterComponent::FindLearnedSkill(FName SkillId, FLearnedSkill& OutSkill)
 
 bool UFighterComponent::SetWeaponProficiency(const FFighterWeaponProficiency& Proficiency)
 {
-	if (!Proficiency.FamilyTag.IsValid())
+	if (!Proficiency.CategoryTag.IsValid())
+	{
+		return false;
+	}
+	const FGameplayTag FamilyRoot = FGameplayTag::RequestGameplayTag(TEXT("Weapon.Family"), false);
+	const FGameplayTag ClassRoot = FGameplayTag::RequestGameplayTag(TEXT("Weapon.Class"), false);
+	if ((!FamilyRoot.IsValid() || !Proficiency.CategoryTag.MatchesTag(FamilyRoot)) &&
+		(!ClassRoot.IsValid() || !Proficiency.CategoryTag.MatchesTag(ClassRoot)))
 	{
 		return false;
 	}
 
 	if (FFighterWeaponProficiency* Existing = FighterData.WeaponProficiencies.FindByPredicate(
 		[&Proficiency](const FFighterWeaponProficiency& Candidate)
-		{ return Candidate.FamilyTag == Proficiency.FamilyTag; }))
+		{ return Candidate.CategoryTag == Proficiency.CategoryTag; }))
 	{
+		if (FMath::IsNearlyEqual(Existing->Proficiency, Proficiency.Proficiency))
+		{
+			return true;
+		}
 		*Existing = Proficiency;
+		++RepertoireRevision;
 		return true;
 	}
 
 	FighterData.WeaponProficiencies.Add(Proficiency);
+	++RepertoireRevision;
 	return true;
 }
 
@@ -107,9 +151,42 @@ float UFighterComponent::GetWeaponProficiency(
 
 	const FFighterWeaponProficiency* Found = FighterData.WeaponProficiencies.FindByPredicate(
 		[&FamilyTag](const FFighterWeaponProficiency& Candidate)
-		{ return Candidate.FamilyTag.MatchesTag(FamilyTag); });
+		{ return Candidate.CategoryTag.MatchesTag(FamilyTag); });
 
 	return Found ? FMath::Clamp(Found->Proficiency, 0.f, 1.f) : FallbackProficiency;
+}
+
+float UFighterComponent::GetEffectiveWeaponProficiency(const UWeaponDefinition* Weapon) const
+{
+	if (!Weapon)
+	{
+		return 0.f;
+	}
+
+	float WeightedTotal = 0.f;
+	float TotalWeight = 0.f;
+	if (Weapon->FamilyTag.IsValid() && Weapon->FamilyProficiencyWeight > 0.f)
+	{
+		WeightedTotal += GetWeaponProficiency(Weapon->FamilyTag) * Weapon->FamilyProficiencyWeight;
+		TotalWeight += Weapon->FamilyProficiencyWeight;
+	}
+
+	TArray<FGameplayTag> ClassTags;
+	Weapon->ClassTags.GetGameplayTagArray(ClassTags);
+	if (!ClassTags.IsEmpty() && Weapon->ClassProficiencyWeight > 0.f)
+	{
+		float ClassTotal = 0.f;
+		for (const FGameplayTag& ClassTag : ClassTags)
+		{
+			ClassTotal += GetWeaponProficiency(ClassTag);
+		}
+		WeightedTotal += (ClassTotal / static_cast<float>(ClassTags.Num())) * Weapon->ClassProficiencyWeight;
+		TotalWeight += Weapon->ClassProficiencyWeight;
+	}
+
+	return TotalWeight > SMALL_NUMBER
+		? FMath::Clamp(WeightedTotal / TotalWeight, 0.f, 1.f)
+		: 0.f;
 }
 
 bool UFighterComponent::SelectBattleTechnique(FName TechniqueId)
@@ -121,9 +198,9 @@ bool UFighterComponent::SelectBattleTechnique(FName TechniqueId)
 
 	// Techniques belong to DT_CombatTechniques; validate their required
 	// skills against what this fighter actually learned.
-	if (BattleTechniquesTable)
+	if (CombatSkillsTable)
 	{
-		const FCombatTechniqueRow* Row = BattleTechniquesTable->FindRow<FCombatTechniqueRow>(
+		const FCombatSkillRow* Row = CombatSkillsTable->FindRow<FCombatSkillRow>(
 			TechniqueId, TEXT("SelectBattleTechnique"), /*bWarnIfRowMissing=*/false);
 
 		if (!Row)

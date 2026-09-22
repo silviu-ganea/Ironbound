@@ -171,4 +171,18 @@ public:
 		int32& OutSampleIndex,
 		float& OutPredictedDistance,
 		float& OutTargetScore);
+
+	/** Solver variant constrained to an authored forward-facing yaw cone. */
+	static bool SolveAttackAlignmentWithFacingLimit(
+		USkeletalMeshComponent* AttackerMesh,
+		USkeletalMeshComponent* VictimMesh,
+		const FBladeTrajectory& Trajectory,
+		UDataTable* CombatTargets,
+		float MaxFacingDeviationDegrees,
+		FTransform& OutAttackerTransform,
+		FName& OutRegion,
+		FName& OutBone,
+		int32& OutSampleIndex,
+		float& OutPredictedDistance,
+		float& OutTargetScore);
 };

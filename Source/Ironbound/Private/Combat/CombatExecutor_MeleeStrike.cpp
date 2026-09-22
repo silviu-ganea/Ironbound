@@ -1,4 +1,4 @@
-﻿#include "Combat/CombatExecutor_MeleeStrike.h"
+#include "Combat/CombatExecutor_MeleeStrike.h"
 
 #include "Combat/CombatEquipmentComponent.h"
 #include "Combat/CombatTechniqueExecutionConfigs.h"
@@ -11,27 +11,13 @@
 #include "GameFramework/Actor.h"
 #include "Ironbound.h"
 
-// Immutable attack-solver limits. Analyzer constants stay inside the
-// trajectory library; these are engagement-phase limits only.
-namespace
-{
-	constexpr float GStancePreparationTimeout = 1.5f;
-	constexpr float GCommitTimeoutExtraSeconds = 2.f;
-
-	/*
-	 * Temporary contact tolerance while targets are represented by skeletal
-	 * bone points (same value the trajectory library uses for feasibility).
-	 */
-	constexpr float GContactToleranceCm = 25.f;
-}
-
 const UExecConfig_MeleeStrike* UCombatExecutor_MeleeStrike::StrikeConfig() const
 {
 	return Cast<UExecConfig_MeleeStrike>(Config);
 }
 
 bool UCombatExecutor_MeleeStrike::OnInitialize(
-	const FCombatTechniqueRequest& Request)
+	const FCombatTechniqueRequest& InRequest)
 {
 	const UExecConfig_MeleeStrike* LocalConfig = StrikeConfig();
 	if (!LocalConfig)
@@ -41,7 +27,7 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 			Warning,
 			TEXT("MeleeStrike [%s | %s]: row does not use a melee-strike execution config"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
@@ -53,12 +39,12 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 			Warning,
 			TEXT("MeleeStrike [%s | %s]: execution config is incomplete (SourceSequence, CombatTargets and Montage are required)"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
 
-	AActor* Target = Request.Target;
+	AActor* Target = InRequest.Target;
 	if (!IsValid(Target))
 	{
 		UE_LOG(
@@ -66,7 +52,7 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 			Warning,
 			TEXT("MeleeStrike [%s | %s]: request has no valid target"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
@@ -79,7 +65,7 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 			Warning,
 			TEXT("MeleeStrike [%s | %s]: no ready equipment"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
@@ -94,7 +80,7 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 			Warning,
 			TEXT("MeleeStrike [%s | %s]: could not derive blade trajectory"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
@@ -108,13 +94,13 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 			Log,
 			TEXT("MeleeStrike [%s | %s]: no attack plan"),
 			*GetNameSafe(GetFighter()),
-			*Request.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString());
 
 		return false;
 	}
 
 	RequestWorldTime = GetWorld()->GetTimeSeconds();
-	CommitDeadline = RequestWorldTime + PlannedTrajectory.ActiveEndTime + GCommitTimeoutExtraSeconds;
+	CommitDeadline = 0.f;
 
 	LastLocation = GetFighter()->GetActorLocation();
 	bHasPreviousLocation = true;
@@ -133,7 +119,7 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 		Log,
 		TEXT("MeleeStrike [%s | %s] stance solved: region=%s bone=%s score=%.1f miss=%.1f"),
 		*GetNameSafe(GetFighter()),
-		*Request.TechniqueId.ToString(),
+		*InRequest.TechniqueId.ToString(),
 		*PlannedTargetRegion.ToString(),
 		*PlannedTargetBone.ToString(),
 		PlannedTargetScore,
@@ -171,11 +157,12 @@ bool UCombatExecutor_MeleeStrike::SolveAttackPlan()
 	FTransform Stance;
 	int32 UnusedSampleIndex = INDEX_NONE;
 
-	if (!UCombatTrajectoryLibrary::SolveAttackAlignment(
+	if (!UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 			FighterMesh,
 			TargetMesh,
 			PlannedTrajectory,
 			StrikeConfig()->CombatTargets,
+			StrikeConfig()->MaxFacingDeviationFromTargetDegrees,
 			Stance,
 			PlannedTargetRegion,
 			PlannedTargetBone,
@@ -209,12 +196,12 @@ bool UCombatExecutor_MeleeStrike::IsReadyToCommit() const
 
 	return FMath::Abs(FacingErrorDegrees) <= LocalConfig->FacingTolerance &&
 		   MeasuredSpeed <= LocalConfig->SettledSpeed &&
-		   CurrentPredictedDistance <= GContactToleranceCm;
+		   CurrentPredictedDistance <= LocalConfig->ContactToleranceCm;
 }
 
 bool UCombatExecutor_MeleeStrike::HasStanceTimedOut(float Now) const
 {
-	return Now - RequestWorldTime > GStancePreparationTimeout ||
+	return Now - RequestWorldTime > StrikeConfig()->PreparationTimeoutSeconds ||
 		   !PlannedTarget.IsValid();
 }
 
@@ -395,20 +382,29 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 	FOnMontageEnded MontageEnded;
 	MontageEnded.BindUObject(this, &UCombatExecutor_MeleeStrike::HandleMontageEnded);
 
-	AnimInstance->Montage_Play(LocalConfig->Montage);
+	const float PlayedLength = AnimInstance->Montage_Play(LocalConfig->Montage);
+	if (PlayedLength <= 0.f)
+	{
+		FinishExecution(TEXT("montage failed to start"));
+		return;
+	}
+
+	CommitDeadline = GetWorld()->GetTimeSeconds() + PlannedTrajectory.ActiveEndTime +
+		LocalConfig->CommitTimeoutExtraSeconds;
 	AnimInstance->Montage_SetEndDelegate(MontageEnded, LocalConfig->Montage);
 	bMontagePlaying = true;
 
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] committed: region=%s bone=%s score=%.1f miss=%.1f"),
+		TEXT("MeleeStrike [%s | %s] committed: region=%s bone=%s score=%.1f miss=%.1f yaw-error=%.1fdeg"),
 		*GetNameSafe(Fighter),
 		*GetRequest().TechniqueId.ToString(),
 		*PlannedTargetRegion.ToString(),
 		*PlannedTargetBone.ToString(),
 		PlannedTargetScore,
-		CurrentPredictedDistance);
+		CurrentPredictedDistance,
+		FMath::Abs(FacingErrorDegrees));
 }
 
 void UCombatExecutor_MeleeStrike::HandleMontageEnded(

@@ -4,6 +4,8 @@
 #include "Combat/CombatTrajectoryLibrary.h"
 #include "CombatThreatTypes.generated.h"
 
+class UStaticMeshComponent;
+
 /**
  * One objective incoming-attack observation.
  *
@@ -24,9 +26,9 @@ struct IRONBOUND_API FCombatThreat
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Threat")
 	TObjectPtr<AActor> Attacker = nullptr;
 
-	/** Attacker weapon actor when known. */
+	/** The physically simulated weapon component, when known. */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Threat")
-	TObjectPtr<AActor> Weapon = nullptr;
+	TObjectPtr<UStaticMeshComponent> Weapon = nullptr;
 
 	/** Technique id of the committed attack. */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Threat")

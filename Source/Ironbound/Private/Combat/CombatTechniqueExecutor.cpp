@@ -70,7 +70,7 @@ bool UCombatTechniqueExecutor::GetHandTarget(FTransform& OutHandTarget) const
 	return false;
 }
 
-bool UCombatTechniqueExecutor::OnInitialize(const FCombatTechniqueRequest& Request)
+bool UCombatTechniqueExecutor::OnInitialize(const FCombatTechniqueRequest& InRequest)
 {
 	return true;
 }
