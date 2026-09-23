@@ -52,6 +52,7 @@ namespace
 	static constexpr int32 GDistanceProbes = 5;
 	static constexpr float GStandoffClearance = 15.f;
 	static constexpr float GStandoffBeyondReach = 60.f;
+	static constexpr float GSimilarStandoffCm = 5.f;
 
 	static TAutoConsoleVariable<int32> CVarDebugTrajectory(
 		TEXT("Ironbound.DebugTrajectory"),
@@ -773,13 +774,176 @@ bool UCombatTrajectoryLibrary::
 }
 
 
+bool UCombatTrajectoryLibrary::ShouldRetainFarthestNearbyOpportunity(
+	const FCombatAttackOpportunity* Farthest,
+	const FCombatAttackOpportunity* QualityBest)
+{
+	return Farthest && Farthest->bFeasible && QualityBest &&
+		Farthest->MissCm <= UCombatTrajectoryLibrary::MaxOpportunityContactMissCm;
+}
+
+
+bool UCombatTrajectoryLibrary::IsContactFeasible(
+	float SignedMissCm,
+	float AcceptedMissToleranceCm,
+	float PenetrationMarginCm)
+{
+	return FMath::IsFinite(SignedMissCm) &&
+		SignedMissCm <= AcceptedMissToleranceCm &&
+		SignedMissCm <= -FMath::Max(0.f, PenetrationMarginCm);
+}
+
+
+float UCombatTrajectoryLibrary::EvaluateBladeContactMiss(
+	const FBladeSegment& Segment,
+	const FTransform& RootTransform,
+	const FVector& TargetLocation,
+	float TargetRadiusCm,
+	float AimPointAlongBlade,
+	float& OutContactFraction)
+{
+	const bool bUseOuterBlade = AimPointAlongBlade < 0.f;
+	const float FirstFraction = bUseOuterBlade
+		? UCombatTrajectoryLibrary::OuterBladeContactStartFraction
+		: FMath::Clamp(AimPointAlongBlade, 0.f, 1.f);
+	const float LastFraction = bUseOuterBlade ? 1.f : FirstFraction;
+	const FVector BladeBase = RootTransform.TransformPosition(Segment.Base);
+	const FVector BladeTip = RootTransform.TransformPosition(Segment.Tip);
+	const FVector ContactStart = FMath::Lerp(BladeBase, BladeTip, FirstFraction);
+	const FVector ContactEnd = FMath::Lerp(BladeBase, BladeTip, LastFraction);
+	const FVector ClosestContact = FMath::ClosestPointOnSegment(
+		TargetLocation, ContactStart, ContactEnd);
+	const FVector ContactPath = ContactEnd - ContactStart;
+	const double ContactPathLengthSquared = ContactPath.SizeSquared();
+	const float LocalContactFraction = ContactPathLengthSquared > KINDA_SMALL_NUMBER
+		? static_cast<float>(FMath::Clamp(
+			FVector::DotProduct(TargetLocation - ContactStart, ContactPath) /
+			ContactPathLengthSquared,
+			0.0,
+			1.0))
+		: 0.f;
+
+	OutContactFraction = FMath::Lerp(
+		FirstFraction, LastFraction, LocalContactFraction);
+	return FVector::Distance(TargetLocation, ClosestContact) -
+		FMath::Max(0.f, TargetRadiusCm);
+}
+
+
+int32 UCombatTrajectoryLibrary::SelectPreferredAttackOpportunityIndex(
+	const TArray<FCombatAttackOpportunity>& Candidates,
+	FString* OutSelectionReason)
+{
+	if (OutSelectionReason)
+	{
+		OutSelectionReason->Empty();
+	}
+	if (Candidates.IsEmpty())
+	{
+		return INDEX_NONE;
+	}
+
+	FName Region = Candidates[0].Region;
+	for (const FCombatAttackOpportunity& Candidate : Candidates)
+	{
+		if (!Candidate.Region.IsNone())
+		{
+			Region = Candidate.Region;
+			break;
+		}
+	}
+	float FarthestFeasibleStandoff = -TNumericLimits<float>::Max();
+	int32 FeasibleCount = 0;
+	for (const FCombatAttackOpportunity& Candidate : Candidates)
+	{
+		if (Candidate.Region == Region && Candidate.ContactSample != INDEX_NONE &&
+			Candidate.bFeasible &&
+			Candidate.MissCm <= UCombatTrajectoryLibrary::MaxOpportunityContactMissCm)
+		{
+			FarthestFeasibleStandoff = FMath::Max(
+				FarthestFeasibleStandoff, Candidate.StandoffCm);
+			++FeasibleCount;
+		}
+	}
+
+	if (FeasibleCount > 0)
+	{
+		int32 SelectedIndex = INDEX_NONE;
+		FString SelectionReason = FeasibleCount == 1
+			? TEXT("only feasible stance")
+			: TEXT("greatest standoff among feasible stances");
+		for (int32 Index = 0; Index < Candidates.Num(); ++Index)
+		{
+			const FCombatAttackOpportunity& Candidate = Candidates[Index];
+			if (Candidate.Region != Region || Candidate.ContactSample == INDEX_NONE ||
+				!Candidate.bFeasible ||
+				Candidate.MissCm > UCombatTrajectoryLibrary::MaxOpportunityContactMissCm ||
+				Candidate.StandoffCm < FarthestFeasibleStandoff - GSimilarStandoffCm)
+			{
+				continue;
+			}
+
+			if (SelectedIndex == INDEX_NONE)
+			{
+				SelectedIndex = Index;
+				continue;
+			}
+
+			const FCombatAttackOpportunity& Selected = Candidates[SelectedIndex];
+			if (Candidate.MissCm < Selected.MissCm - 1.f)
+			{
+				SelectedIndex = Index;
+				SelectionReason = TEXT("better contact quality among similarly ranged stances");
+			}
+			else if (FMath::IsNearlyEqual(Candidate.MissCm, Selected.MissCm, 1.f) &&
+				Candidate.MovementCostCm < Selected.MovementCostCm - 1.f)
+			{
+				SelectedIndex = Index;
+				SelectionReason = TEXT("lower movement cost among similarly ranged, similarly accurate stances");
+			}
+			else if (FMath::IsNearlyEqual(Candidate.MissCm, Selected.MissCm, 1.f) &&
+				FMath::IsNearlyEqual(Candidate.MovementCostCm, Selected.MovementCostCm, 1.f) &&
+				Candidate.StandoffCm > Selected.StandoffCm + 0.1f)
+			{
+				SelectedIndex = Index;
+				SelectionReason = TEXT("greater standoff among similarly accurate, similarly mobile stances");
+			}
+		}
+
+		if (OutSelectionReason)
+		{
+			*OutSelectionReason = MoveTemp(SelectionReason);
+		}
+		return SelectedIndex;
+	}
+
+	int32 ClosestIndex = INDEX_NONE;
+	for (int32 Index = 0; Index < Candidates.Num(); ++Index)
+	{
+		const FCombatAttackOpportunity& Candidate = Candidates[Index];
+		if (Candidate.Region == Region && Candidate.ContactSample != INDEX_NONE &&
+			(ClosestIndex == INDEX_NONE ||
+			 Candidate.MissCm < Candidates[ClosestIndex].MissCm))
+		{
+			ClosestIndex = Index;
+		}
+	}
+	if (OutSelectionReason && ClosestIndex != INDEX_NONE)
+	{
+		*OutSelectionReason = TEXT("closest signed miss; no stance met the penetration requirement");
+	}
+	return ClosestIndex;
+}
+
+
 void UCombatTrajectoryLibrary::FindAttackOpportunities(
 	USkeletalMeshComponent* AttackerMesh, USkeletalMeshComponent* VictimMesh,
 	const FBladeTrajectory& Trajectory, const UDataTable* CombatTargets,
 	FName TechniqueId, FName RequiredRegion, float AimPointAlongBlade,
 	float AimWindowStartFraction, float AimWindowEndFraction,
 	float FacingLimitDegrees, float ContactToleranceCm, float MaxNearbyMoveCm,
-	TArray<FCombatAttackOpportunity>& OutOpportunities)
+	TArray<FCombatAttackOpportunity>& OutOpportunities,
+	float ContactPenetrationMarginCm)
 {
 	OutOpportunities.Reset();
 	if (!AttackerMesh || !VictimMesh || !CombatTargets || !Trajectory.bValid)
@@ -807,10 +971,58 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 	const float MaximumMiss = FMath::Min(
 		FMath::Max(0.f, ContactToleranceCm),
 		UCombatTrajectoryLibrary::MaxOpportunityContactMissCm);
+	const float PenetrationMargin = FMath::Max(0.f, ContactPenetrationMarginCm);
 
 	TMap<FName, FCombatAttackOpportunity> BestCurrentByRegion;
 	TMap<FName, FCombatAttackOpportunity> BestNearbyByRegion;
 	TMap<FName, FCombatAttackOpportunity> FarthestNearbyByRegion;
+	TMap<FName, float> FarthestFeasibleStandoffByRegion;
+	TMap<FName, TArray<FCombatAttackOpportunity>> FarthestFeasibleBandByRegion;
+
+	auto TrackFarthestFeasibleCandidate = [&](const FCombatAttackOpportunity& Candidate)
+	{
+		if (!Candidate.bFeasible || Candidate.ContactSample == INDEX_NONE)
+		{
+			return;
+		}
+
+		float* FarthestStandoff =
+			FarthestFeasibleStandoffByRegion.Find(Candidate.Region);
+		TArray<FCombatAttackOpportunity>& Band =
+			FarthestFeasibleBandByRegion.FindOrAdd(Candidate.Region);
+		if (!FarthestStandoff)
+		{
+			FarthestFeasibleStandoffByRegion.Add(Candidate.Region, Candidate.StandoffCm);
+			Band.Add(Candidate);
+			return;
+		}
+
+		if (Candidate.StandoffCm > *FarthestStandoff)
+		{
+			*FarthestStandoff = Candidate.StandoffCm;
+			Band.RemoveAll([FarthestStandoff](const FCombatAttackOpportunity& Existing)
+			{
+				return Existing.StandoffCm < *FarthestStandoff - GSimilarStandoffCm;
+			});
+		}
+		if (Candidate.StandoffCm < *FarthestStandoff - GSimilarStandoffCm)
+		{
+			return;
+		}
+
+		for (const FCombatAttackOpportunity& Existing : Band)
+		{
+			if (FVector::DistSquared2D(
+					Existing.Stance.GetLocation(), Candidate.Stance.GetLocation()) < 25.f &&
+				FMath::Abs(FMath::FindDeltaAngleDegrees(
+					Existing.Stance.Rotator().Yaw,
+					Candidate.Stance.Rotator().Yaw)) < 2.f)
+			{
+				return;
+			}
+		}
+		Band.Add(Candidate);
+	};
 
 	auto IsBetterOpportunity = [](const FCombatAttackOpportunity& Candidate,
 		const FCombatAttackOpportunity& CurrentBest, bool bPreferLowMovement)
@@ -868,8 +1080,12 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 		{
 			return;
 		}
-		FTransform Stance(FRotator(0.f, Yaw, 0.f), Location, Attacker->GetActorScale3D());
 		const float Standoff = FVector::Dist2D(Location, Target);
+		if (bCurrent && Standoff < MinimumDistance)
+		{
+			return;
+		}
+		FTransform Stance(FRotator(0.f, Yaw, 0.f), Location, Attacker->GetActorScale3D());
 
 		const TMap<FName, uint8*>& TargetRows = CombatTargets->GetRowMap();
 		for (const TPair<FName, uint8*>& Pair : TargetRows)
@@ -891,9 +1107,12 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 				Trajectory, Stance, VictimMesh, CombatTargets,
 				Candidate.Region, Candidate.Bone, Candidate.ContactSample,
 				Candidate.ContactScore, Region, AimPointAlongBlade,
-				AimWindowStartFraction, AimWindowEndFraction, NAME_None, true);
+				AimWindowStartFraction, AimWindowEndFraction, NAME_None, true,
+				&Candidate.ContactFraction);
 			Candidate.bFeasible = Candidate.ContactSample != INDEX_NONE &&
-				Candidate.MissCm <= MaximumMiss;
+				UCombatTrajectoryLibrary::IsContactFeasible(
+					Candidate.MissCm, MaximumMiss, PenetrationMargin);
+			TrackFarthestFeasibleCandidate(Candidate);
 			Candidate.Quality = Candidate.bFeasible
 				? FMath::Clamp(-Candidate.MissCm, -MaximumMiss, 30.f)
 				: 0.f;
@@ -973,22 +1192,46 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 			continue;
 		}
 
-		if (const FCombatAttackOpportunity* Current = BestCurrentByRegion.Find(Region))
+		TArray<FCombatAttackOpportunity> RegionCandidates;
+		const TArray<FCombatAttackOpportunity>* FarthestBand =
+			FarthestFeasibleBandByRegion.Find(Region);
+		if (FarthestBand)
 		{
-			AddIfUnique(*Current);
-		}
-		if (const FCombatAttackOpportunity* Nearby = BestNearbyByRegion.Find(Region))
-		{
-			AddIfUnique(*Nearby);
+			RegionCandidates.Append(*FarthestBand);
 		}
 		if (const FCombatAttackOpportunity* Farthest = FarthestNearbyByRegion.Find(Region))
 		{
 			const FCombatAttackOpportunity* QualityBest = BestNearbyByRegion.Find(Region);
-			if (Farthest->bFeasible && QualityBest &&
-				Farthest->MissCm <= QualityBest->MissCm + 8.f)
+			if (ShouldRetainFarthestNearbyOpportunity(Farthest, QualityBest) &&
+				!FarthestBand)
 			{
-				AddIfUnique(*Farthest);
+				RegionCandidates.Add(*Farthest);
 			}
+		}
+		if (RegionCandidates.IsEmpty())
+		{
+			if (const FCombatAttackOpportunity* Current = BestCurrentByRegion.Find(Region))
+			{
+				RegionCandidates.Add(*Current);
+			}
+			if (const FCombatAttackOpportunity* Nearby = BestNearbyByRegion.Find(Region))
+			{
+				RegionCandidates.Add(*Nearby);
+			}
+		}
+
+		FString SelectionReason;
+		const int32 SelectedIndex = SelectPreferredAttackOpportunityIndex(
+			RegionCandidates, &SelectionReason);
+		if (RegionCandidates.IsValidIndex(SelectedIndex))
+		{
+			const FCombatAttackOpportunity& Selected = RegionCandidates[SelectedIndex];
+			AddIfUnique(Selected);
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("Attack opportunity selected: region=%s standoff=%.1fcm sample=%d bladeFraction=%.3f signedMiss=%.1fcm reason=%s"),
+				*Selected.Region.ToString(), Selected.StandoffCm,
+				Selected.ContactSample, Selected.ContactFraction,
+				Selected.MissCm, *SelectionReason);
 		}
 	}
 }
@@ -1007,12 +1250,17 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 	float AimWindowStartFraction,
 	float AimWindowEndFraction,
 	FName RequiredBone,
-	bool bPreferContactMargin)
+	bool bPreferContactMargin,
+	float* OutContactFraction)
 {
 	OutRegion = NAME_None;
 	OutBone = NAME_None;
 	OutSample = INDEX_NONE;
 	OutTargetScore = 0.f;
+	if (OutContactFraction)
+	{
+		*OutContactFraction = -1.f;
+	}
 
 	if (!VictimMesh ||
 		!CombatTargets ||
@@ -1045,6 +1293,9 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 
 	int32 ClosestSample =
 		INDEX_NONE;
+
+	float ClosestFraction =
+		-1.f;
 
 	float ClosestScore =
 		0.f;
@@ -1091,6 +1342,7 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 
 		int32 RegionBestSample =
 			INDEX_NONE;
+		float RegionBestFraction = -1.f;
 
 		for (const FName Bone :
 			 Row->Bones)
@@ -1112,20 +1364,16 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 			for (int32 Index = FirstSample; Index <= LastSample; ++Index)
 			{
 				const FBladeSegment& Segment = Trajectory.Segments[Index];
-				const FVector BladeBase = RootTransform.TransformPosition(Segment.Base);
-				const FVector BladeTip = RootTransform.TransformPosition(Segment.Tip);
-				const float CenterlineDistance = AimPointAlongBlade < 0.f
-					? FMath::Sqrt(PointSegmentDistanceSquared(Contact, BladeBase, BladeTip))
-					: FVector::Distance(Contact, FMath::Lerp(
-						BladeBase, BladeTip, FMath::Clamp(AimPointAlongBlade, 0.f, 1.f)));
-				// Signed distance to the region's approximated hit volume. A
-				// negative value means the blade trajectory passes inside it.
-				const float Miss = CenterlineDistance - ContactRadius;
+				float ContactFraction = -1.f;
+				const float Miss = EvaluateBladeContactMiss(
+					Segment, RootTransform, Contact, ContactRadius,
+					AimPointAlongBlade, ContactFraction);
 				if (Miss < RegionBestMiss)
 				{
-				RegionBestMiss = Miss;
-				RegionBestBone = Bone;
-				RegionBestSample = Index;
+					RegionBestMiss = Miss;
+					RegionBestBone = Bone;
+					RegionBestSample = Index;
+					RegionBestFraction = ContactFraction;
 				}
 			}
 		}
@@ -1148,6 +1396,9 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 
 			ClosestSample =
 				RegionBestSample;
+
+			ClosestFraction =
+				RegionBestFraction;
 
 			ClosestScore =
 				Row->Score;
@@ -1183,6 +1434,11 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 			OutSample =
 				RegionBestSample;
 
+			if (OutContactFraction)
+			{
+				*OutContactFraction = RegionBestFraction;
+			}
+
 			OutTargetScore =
 				Row->Score;
 		}
@@ -1205,6 +1461,11 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 
 	OutSample =
 		ClosestSample;
+
+	if (OutContactFraction)
+	{
+		*OutContactFraction = ClosestFraction;
+	}
 
 	OutTargetScore =
 		ClosestScore;
@@ -1254,7 +1515,8 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 	FName RequiredRegion,
 	float AimPointAlongBlade,
 	float AimWindowStartFraction,
-	float AimWindowEndFraction)
+	float AimWindowEndFraction,
+	float ContactPenetrationMarginCm)
 {
 	OutAttackerTransform =
 		FTransform::Identity;
@@ -1348,6 +1610,7 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 		GStandoffBeyondReach;
 
 	const float FacingLimit = FMath::Clamp(MaxFacingDeviationDegrees, 0.f, 180.f);
+	const float PenetrationMargin = FMath::Max(0.f, ContactPenetrationMarginCm);
 
 	bool bFoundFeasible =
 		false;
@@ -1412,9 +1675,8 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 		++ScoredCandidates;
 		ClosestScoredMiss = FMath::Min(ClosestScoredMiss, Miss);
 
-		const bool bFeasible =
-			Miss <=
-				GContactToleranceCm;
+		const bool bFeasible = IsContactFeasible(
+			Miss, GContactToleranceCm, PenetrationMargin);
 
 		// Trajectory samples are already in actor-root space (MeshToRoot was
 		// applied by BuildBladeTrajectoryWithGrip). Subtracting the mesh yaw

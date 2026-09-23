@@ -117,8 +117,10 @@ struct IRONBOUND_API FCombatAttackOpportunity
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float MovementCostCm = 0.f;
 	/** Root-to-target horizontal distance at this stance. */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float StandoffCm = 0.f;
-	/** Blade fraction used for this opportunity's contact check. */
+	/** Requested blade fraction; negative values select the distal 10%. */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float AimPointAlongBlade = -1.f;
+	/** Actual blade fraction at the selected contact sample. */
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float ContactFraction = -1.f;
 };
 
 /**
@@ -135,6 +137,32 @@ class IRONBOUND_API UCombatTrajectoryLibrary : public UBlueprintFunctionLibrary
 public:
 	/** Maximum miss accepted when an AI commits a previously selected opportunity. */
 	static constexpr float MaxOpportunityContactMissCm = 12.f;
+	/** Negative aim fractions evaluate contact only along the blade's distal 10%. */
+	static constexpr float OuterBladeContactStartFraction = 0.9f;
+	/** Default minimum penetration into the target volume for a planned hit. */
+	static constexpr float DefaultContactPenetrationMarginCm = 2.f;
+
+	/** Whether the farthest feasible nearby stance should remain selectable. */
+	static bool ShouldRetainFarthestNearbyOpportunity(
+		const FCombatAttackOpportunity* Farthest,
+		const FCombatAttackOpportunity* QualityBest);
+	/** Contact miss is signed; feasible hits must penetrate by the requested margin. */
+	static bool IsContactFeasible(
+		float SignedMissCm,
+		float AcceptedMissToleranceCm,
+		float PenetrationMarginCm = DefaultContactPenetrationMarginCm);
+	/** Evaluate signed miss and actual blade fraction without world or asset dependencies. */
+	static float EvaluateBladeContactMiss(
+		const FBladeSegment& Segment,
+		const FTransform& RootTransform,
+		const FVector& TargetLocation,
+		float TargetRadiusCm,
+		float AimPointAlongBlade,
+		float& OutContactFraction);
+	/** Select one preferred stance from candidates belonging to one region. */
+	static int32 SelectPreferredAttackOpportunityIndex(
+		const TArray<FCombatAttackOpportunity>& Candidates,
+		FString* OutSelectionReason = nullptr);
 
 	/** Query viable contact opportunities by target region and stance. */
 	static void FindAttackOpportunities(
@@ -143,7 +171,8 @@ public:
 		FName TechniqueId, FName RequiredRegion, float AimPointAlongBlade,
 		float AimWindowStartFraction, float AimWindowEndFraction,
 		float FacingLimitDegrees, float ContactToleranceCm, float MaxNearbyMoveCm,
-		TArray<FCombatAttackOpportunity>& OutOpportunities);
+		TArray<FCombatAttackOpportunity>& OutOpportunities,
+		float ContactPenetrationMarginCm = DefaultContactPenetrationMarginCm);
 	/**
 	 * Analyze the complete source animation and derive its active blade path.
 	 * Sampling count and active strike window are determined internally.
@@ -175,7 +204,7 @@ public:
 	 *
 	 * Returns blade miss distance in cm. OutRegion/OutBone/OutSample identify
 	 * the selected contact candidate; OutTargetScore is the authored score of
-	 * that region.
+	 * that region. OutContactFraction reports the actual point along the blade.
 	 */
 	static float EvaluateScoredContact(
 		const FBladeTrajectory& Trajectory,
@@ -191,7 +220,8 @@ public:
 		float AimWindowStartFraction = 0.f,
 		float AimWindowEndFraction = 1.f,
 		FName RequiredBone = NAME_None,
-		bool bPreferContactMargin = false);
+		bool bPreferContactMargin = false,
+		float* OutContactFraction = nullptr);
 
 	/**
 	 * Search attacker yaw and stand-off for a feasible contact against the
@@ -227,5 +257,6 @@ public:
 		FName RequiredRegion = NAME_None,
 		float AimPointAlongBlade = -1.f,
 		float AimWindowStartFraction = 0.f,
-		float AimWindowEndFraction = 1.f);
+		float AimWindowEndFraction = 1.f,
+		float ContactPenetrationMarginCm = DefaultContactPenetrationMarginCm);
 };
