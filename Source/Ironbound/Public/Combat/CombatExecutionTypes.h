@@ -52,6 +52,9 @@ struct IRONBOUND_API FCombatExecutionRecord
 	int32 RecordId = INDEX_NONE;
 
 	UPROPERTY()
+	int32 PlanId = 0;
+
+	UPROPERTY()
 	FName TechniqueId;
 
 	UPROPERTY()
@@ -141,6 +144,14 @@ struct IRONBOUND_API FCombatTechniqueRequest
 	/** Optional anatomical region row name (for example Head); empty uses the technique's default. */
 	UPROPERTY(BlueprintReadWrite, Category="Combat|Request")
 	FName TargetRegion = NAME_None;
+
+	/** Optional decision-maker-selected opportunity. Execution validates it without choosing another stance. */
+	UPROPERTY(BlueprintReadWrite, Category="Combat|Request")
+	FCombatAttackOpportunity PlannedOpportunity;
+
+	/** Correlation id supplied by a decision-maker; zero for unscripted/player requests. */
+	UPROPERTY(BlueprintReadWrite, Category="Combat|Request")
+	int32 PlanId = 0;
 
 	/** Threat payload for reactive techniques; advisory for deliberate ones. */
 	UPROPERTY(BlueprintReadWrite, Category="Combat|Request")

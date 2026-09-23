@@ -47,6 +47,7 @@ private:
 
 	bool BuildAttackTrajectory(FBladeTrajectory& OutTrajectory) const;
 	bool SolveAttackPlan();
+	bool AdoptPlannedOpportunity(const FCombatAttackOpportunity& Opportunity);
 	bool IsAtStancePosition() const;
 	bool IsReadyToCommit() const;
 	bool HasStanceTimedOut(float Now) const;
@@ -61,6 +62,7 @@ private:
 	void HandleMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	void DrawAttackDebug();
+	void DrawPlannedAttackDebug() const;
 
 	EStrikePhase Phase = EStrikePhase::Waiting;
 
@@ -87,6 +89,8 @@ private:
 	float RecoveryUntil = 0.f;
 	float CommitDeadline = 0.f;
 	float RequestWorldTime = 0.f;
+	float InvalidContactStartWorldTime = 0.f;
+	float NextAlignmentDiagnosticWorldTime = 0.f;
 	float MaxCommittedFacingError = 0.f;
 	float FacingErrorDegrees = 0.f;
 

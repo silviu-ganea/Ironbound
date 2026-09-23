@@ -134,6 +134,7 @@ bool UCombatExecutionComponent::RequestTechnique(
 
 	FCombatExecutionRecord& Record = Executions.AddDefaulted_GetRef();
 	Record.RecordId = NextRecordId++;
+	Record.PlanId = Request.PlanId;
 	Record.TechniqueId = Request.TechniqueId;
 	Record.Kind = ExecutionKind(Row->Kind);
 	Record.BodyScope = Row->BodyScope;
@@ -614,10 +615,11 @@ void UCombatExecutionComponent::FinishRecord(int32 RecordId, const TCHAR* Reason
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("Execution terminal [%s | %s] record %d: %s"),
+		TEXT("Execution terminal [%s | %s] record %d plan %d: %s"),
 		*GetNameSafe(GetOwner()),
 		*Record.TechniqueId.ToString(),
 		Record.RecordId,
+		Record.PlanId,
 		Reason);
 
 	BroadcastRequirement();
@@ -685,6 +687,23 @@ void UCombatExecutionComponent::CancelAllExecutions()
 		{
 			FinishRecord(RecordId, TEXT("cancelled"));
 		}
+	}
+}
+
+void UCombatExecutionComponent::CancelPlannedExecution(int32 PlanId, const TCHAR* Reason)
+{
+	if (PlanId <= 0) return;
+	for (const FCombatExecutionRecord& Record : Executions)
+	{
+		if (Record.PlanId != PlanId || Record.Kind != ECombatExecutionKind::Deliberate ||
+			Record.State != ECombatExecutionState::Preparing || !Record.Executor)
+		{
+			continue;
+		}
+		const int32 RecordId = Record.RecordId;
+		Record.Executor->RequestFinish(Reason);
+		if (FindRecord(RecordId)) FinishRecord(RecordId, Reason);
+		return;
 	}
 }
 

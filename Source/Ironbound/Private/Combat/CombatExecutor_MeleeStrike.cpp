@@ -89,19 +89,28 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 
 	PlannedTrajectory = MoveTemp(Trajectory);
 
-	if (!SolveAttackPlan())
+	if (InRequest.PlanId > 0 && !InRequest.PlannedOpportunity.bFeasible)
+	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("[AI] EXECUTION PlanId=%d Result=Refused Reason=MissingSelectedOpportunity"), InRequest.PlanId);
+		return false;
+	}
+	if (!(InRequest.PlannedOpportunity.bFeasible
+		? AdoptPlannedOpportunity(InRequest.PlannedOpportunity) : SolveAttackPlan()))
 	{
 		UE_LOG(
 			LogIronboundCombat,
 			Log,
-			TEXT("MeleeStrike [%s | %s]: no attack plan"),
+			TEXT("MeleeStrike [%s | %s]: selected attack opportunity invalid (plan %d)"),
 			*GetNameSafe(GetFighter()),
-			*InRequest.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString(), InRequest.PlanId);
 
 		return false;
 	}
 
 	RequestWorldTime = GetWorld()->GetTimeSeconds();
+	InvalidContactStartWorldTime = 0.f;
+	NextAlignmentDiagnosticWorldTime = RequestWorldTime + 1.f;
 	CommitDeadline = 0.f;
 
 	LastLocation = GetFighter()->GetActorLocation();
@@ -119,9 +128,10 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] stance solved: region=%s bone=%s score=%.1f miss=%.1f sample=%d time=%.3f"),
+		TEXT("MeleeStrike [%s | %s] stance selected: plan=%d region=%s bone=%s score=%.1f miss=%.1f sample=%d time=%.3f"),
 		*GetNameSafe(GetFighter()),
 		*InRequest.TechniqueId.ToString(),
+		InRequest.PlanId,
 		*PlannedTargetRegion.ToString(),
 		*PlannedTargetBone.ToString(),
 		PlannedTargetScore,
@@ -130,6 +140,58 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 		PlannedTrajectory.Segments.IsValidIndex(PlannedContactSampleIndex)
 			? PlannedTrajectory.Segments[PlannedContactSampleIndex].TimeSeconds : -1.f);
 
+	return true;
+}
+
+bool UCombatExecutor_MeleeStrike::AdoptPlannedOpportunity(const FCombatAttackOpportunity& Opportunity)
+{
+	const AActor* Target = PlannedTarget.Get();
+	USkeletalMeshComponent* TargetMesh = Target ? Target->FindComponentByClass<USkeletalMeshComponent>() : nullptr;
+	const UExecConfig_MeleeStrike* LocalConfig = StrikeConfig();
+	if (!TargetMesh || Opportunity.TechniqueId != GetRequest().TechniqueId ||
+		FVector::Dist2D(Target->GetActorLocation(), Opportunity.TargetLocationAtQuery) > 75.f ||
+		Opportunity.Stance.GetLocation().ContainsNaN())
+	{
+		return false;
+	}
+	const FName RequiredRegion = GetRequest().TargetRegion.IsNone()
+		? LocalConfig->DefaultTargetRegion : GetRequest().TargetRegion;
+	if (!RequiredRegion.IsNone() && RequiredRegion != Opportunity.Region)
+	{
+		return false;
+	}
+	const FVector Toward = (Target->GetActorLocation() - Opportunity.Stance.GetLocation()).GetSafeNormal2D();
+	if (Toward.IsNearlyZero() ||
+		FMath::Abs(FMath::FindDeltaAngleDegrees(Toward.Rotation().Yaw,
+			Opportunity.Stance.Rotator().Yaw)) > LocalConfig->MaxFacingDeviationFromTargetDegrees + 0.01f)
+	{
+		return false;
+	}
+	FName Region, Bone;
+	int32 Sample = INDEX_NONE;
+	float Score = 0.f;
+	const float Miss = UCombatTrajectoryLibrary::EvaluateScoredContact(
+		PlannedTrajectory, Opportunity.Stance, TargetMesh, LocalConfig->CombatTargets,
+		Region, Bone, Sample, Score, Opportunity.Region, LocalConfig->AimPointAlongBlade,
+		LocalConfig->AimWindowStartFraction, LocalConfig->AimWindowEndFraction,
+		Opportunity.Bone);
+	if (Bone != Opportunity.Bone || Sample == INDEX_NONE || Miss > LocalConfig->ContactToleranceCm)
+	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("[AI] EXECUTION PlanId=%d AlignmentValid=false region=%s bone=%s miss=%.1f"),
+			GetRequest().PlanId, *Region.ToString(), *Bone.ToString(), Miss);
+		return false;
+	}
+	PlannedTransform = Opportunity.Stance;
+	PlannedTargetRegion = Region;
+	PlannedTargetBone = Bone;
+	PlannedContactSampleIndex = Sample;
+	PlannedTargetScore = Score;
+	CurrentPredictedDistance = Miss;
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[AI] EXECUTION PlanId=%d AlignmentValid=true stance=%s region=%s bone=%s miss=%.1f"),
+		GetRequest().PlanId, *PlannedTransform.GetLocation().ToCompactString(),
+		*Region.ToString(), *Bone.ToString(), Miss);
 	return true;
 }
 
@@ -300,8 +362,8 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 		if (HasStanceTimedOut(Now))
 		{
 			UE_LOG(LogIronboundCombat, Warning,
-				TEXT("MeleeStrike [%s | %s] stance timed out: region=%s bone=%s arrived=%d miss=%.1fcm yaw=%.1fdeg speed=%.1fcm/s"),
-				*GetNameSafe(Fighter), *GetRequest().TechniqueId.ToString(),
+				TEXT("MeleeStrike [%s | %s] stance timed out: plan=%d region=%s bone=%s arrived=%d miss=%.1fcm yaw=%.1fdeg speed=%.1fcm/s"),
+				*GetNameSafe(Fighter), *GetRequest().TechniqueId.ToString(), GetRequest().PlanId,
 				*PlannedTargetRegion.ToString(), *PlannedTargetBone.ToString(),
 				bAtStancePosition ? 1 : 0, CurrentPredictedDistance,
 				FacingErrorDegrees, MeasuredSpeed);
@@ -314,6 +376,7 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 		// running a global search every tick makes the goal orbit the defender.
 
 		bAtStancePosition = IsAtStancePosition();
+		UpdateFacingError();
 
 		if (bAtStancePosition)
 		{
@@ -321,7 +384,6 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 			// during execution is no longer part of the engagement.
 			CachedRequirement.bMayMoveDuringExecution = false;
 
-			UpdateFacingError();
 			AttackFacingIntent = PlannedTransform.GetRotation().GetForwardVector();
 			FName ActualRegion, ActualBone;
 			int32 ActualSample = INDEX_NONE;
@@ -334,6 +396,21 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 				StrikeConfig()->AimPointAlongBlade,
 				StrikeConfig()->AimWindowStartFraction,
 				StrikeConfig()->AimWindowEndFraction, PlannedTargetBone);
+			if (FMath::Abs(FacingErrorDegrees) <= StrikeConfig()->FacingTolerance &&
+				MeasuredSpeed <= StrikeConfig()->SettledSpeed &&
+				CurrentPredictedDistance > StrikeConfig()->ContactToleranceCm)
+			{
+				if (InvalidContactStartWorldTime <= 0.f) InvalidContactStartWorldTime = Now;
+				if (Now - InvalidContactStartWorldTime > 0.75f)
+				{
+					UE_LOG(LogIronboundCombat, Warning,
+						TEXT("[AI] EXECUTION PlanId=%d Result=ContactNoLongerValid miss=%.1fcm"),
+						GetRequest().PlanId, CurrentPredictedDistance);
+					FinishExecution(TEXT("contact no longer valid"));
+					return;
+				}
+			}
+			else InvalidContactStartWorldTime = 0.f;
 
 			if (IsReadyToCommit())
 			{
@@ -343,11 +420,29 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 		else
 		{
 			CachedRequirement.bMayMoveDuringExecution = true;
-			FacingErrorDegrees = 0.f;
+			AttackFacingIntent = FVector::ZeroVector;
 		}
 
 		CachedRequirement.DesiredLocation = PlannedTransform.GetLocation();
 		CachedRequirement.DesiredFacing = PlannedTransform.Rotator();
+		DrawPlannedAttackDebug();
+		if (Now >= NextAlignmentDiagnosticWorldTime)
+		{
+			const float PositionError = FVector::Dist(Fighter->GetActorLocation(), PlannedTransform.GetLocation());
+			const float TargetDrift = PlannedTarget.IsValid()
+				? FVector::Dist2D(PlannedTarget->GetActorLocation(), GetRequest().PlannedOpportunity.TargetLocationAtQuery)
+				: -1.f;
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[AI] ALIGNMENT PlanId=%d arrived=%d positionError=%.1f/%.1fcm yawError=%.1f/%.1fdeg speed=%.1f/%.1fcmps miss=%.1f/%.1fcm measured=%d targetDrift=%.1fcm actorYaw=%.1f desiredYaw=%.1f"),
+				GetRequest().PlanId, bAtStancePosition ? 1 : 0,
+				PositionError, StrikeConfig()->ArrivalTolerance,
+				FacingErrorDegrees, StrikeConfig()->FacingTolerance,
+				MeasuredSpeed, StrikeConfig()->SettledSpeed,
+				CurrentPredictedDistance, StrikeConfig()->ContactToleranceCm,
+				bAtStancePosition ? 1 : 0, TargetDrift,
+				Fighter->GetActorRotation().Yaw, PlannedTransform.Rotator().Yaw);
+			NextAlignmentDiagnosticWorldTime = Now + 1.f;
+		}
 
 		break;
 	}
@@ -434,9 +529,10 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] committed: region=%s bone=%s score=%.1f miss=%.1f yaw-error=%.1fdeg"),
+		TEXT("MeleeStrike [%s | %s] committed: plan=%d region=%s bone=%s score=%.1f miss=%.1f yaw-error=%.1fdeg"),
 		*GetNameSafe(Fighter),
 		*GetRequest().TechniqueId.ToString(),
+		GetRequest().PlanId,
 		*PlannedTargetRegion.ToString(),
 		*PlannedTargetBone.ToString(),
 		PlannedTargetScore,
@@ -539,6 +635,50 @@ bool UCombatExecutor_MeleeStrike::IsAwaitingAlignment() const
 float UCombatExecutor_MeleeStrike::GetFacingDeltaDegrees() const
 {
 	return IsAwaitingAlignment() ? FacingErrorDegrees : 0.f;
+}
+
+void UCombatExecutor_MeleeStrike::DrawPlannedAttackDebug() const
+{
+	const AActor* Fighter = GetFighter();
+	UWorld* World = GetWorld();
+	if (!Fighter || !World || !StrikeConfig()->bDrawDebugBlade ||
+		PlannedTrajectory.Segments.IsEmpty())
+	{
+		return;
+	}
+	const FVector Stance = PlannedTransform.GetLocation();
+	DrawDebugSphere(World, Stance, 12.f, 12, FColor::Orange, false, 0.f, 0, 1.5f);
+	DrawDebugDirectionalArrow(World, Stance, Stance +
+		PlannedTransform.GetRotation().GetForwardVector() * 65.f, 15.f,
+		FColor::Orange, false, 0.f, 0, 2.f);
+	DrawDebugLine(World, Fighter->GetActorLocation(), Stance,
+		FColor::White, false, 0.f, 0, 0.8f);
+	for (int32 Index = 1; Index < PlannedTrajectory.Segments.Num(); ++Index)
+	{
+		DrawDebugLine(World,
+			PlannedTransform.TransformPosition(PlannedTrajectory.Segments[Index - 1].Tip),
+			PlannedTransform.TransformPosition(PlannedTrajectory.Segments[Index].Tip),
+			FColor::Cyan, false, 0.f, 0, 2.f);
+	}
+	if (PlannedTrajectory.Segments.IsValidIndex(PlannedContactSampleIndex))
+	{
+		const FBladeSegment& Contact = PlannedTrajectory.Segments[PlannedContactSampleIndex];
+		const FVector Base = PlannedTransform.TransformPosition(Contact.Base);
+		const FVector Tip = PlannedTransform.TransformPosition(Contact.Tip);
+		DrawDebugLine(World, Base, Tip, FColor::Yellow, false, 0.f, 0, 3.f);
+	}
+	if (const AActor* Target = PlannedTarget.Get())
+	{
+		if (const USkeletalMeshComponent* Mesh = Target->FindComponentByClass<USkeletalMeshComponent>())
+		{
+			DrawDebugSphere(World, Mesh->GetBoneLocation(PlannedTargetBone), 8.f, 12,
+				FColor::Green, false, 0.f, 0, 1.5f);
+		}
+	}
+	DrawDebugString(World, Stance + FVector(0.f, 0.f, 85.f),
+		FString::Printf(TEXT("Plan %d: %s / %s (%.1f cm)"), GetRequest().PlanId,
+			*PlannedTargetRegion.ToString(), *PlannedTargetBone.ToString(),
+			CurrentPredictedDistance), nullptr, FColor::Cyan, 0.12f, false);
 }
 
 void UCombatExecutor_MeleeStrike::DrawAttackDebug()

@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "AIController.h"
 #include "Combat/CombatTechniqueRow.h"
+#include "Combat/CombatTrajectoryLibrary.h"
 #include "TimerManager.h"
 #include "IronboundCombatAIController.generated.h"
 
@@ -12,6 +13,12 @@ class UCombatFocusComponent;
 class UCombatTechniqueComponent;
 class UFighterComponent;
 class UFighterVitalsComponent;
+
+UENUM(BlueprintType)
+enum class EIronboundAIMovementMode : uint8
+{
+	Idle, Pursuit, GuardManeuver, AttackAlignment, CommittedAttack
+};
 
 /**
  * Small, data-driven duel policy for the combat prototype.
@@ -48,6 +55,33 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Movement", meta=(ClampMin="0.0"))
 	float FailedPathRetryDelaySeconds = 0.75f;
+
+	/** Chance to choose a nearby improvement when both current and nearby attacks are useful. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float RepositionPreference = 0.25f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="50.0"))
+	float PlanningRangeCm = 450.f;
+
+	/** If no attack is reachable from the planning boundary, advance to this distance before reassessing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="50.0"))
+	float CloseApproachDistanceCm = 220.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="10.0"))
+	float MaxNearbyMoveCm = 250.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0"))
+	float MeaningfulQualityGain = 4.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="10.0"))
+	float TargetDisplacementToleranceCm = 75.f;
+
+	UFUNCTION(BlueprintPure, Category="Ironbound AI|Movement")
+	EIronboundAIMovementMode GetCombatMovementMode() const { return MovementMode; }
+
+	/** Blueprint Mover can use this before applying its rotation mode. */
+	UFUNCTION(BlueprintPure, Category="Ironbound AI|Movement")
+	FVector ResolveCombatMovementFacing(FVector TravelIntent) const;
 
 	/** Base latency before answering a recognized threat; Agility reduces it. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Reaction", meta=(ClampMin="0.0"))
@@ -89,6 +123,11 @@ private:
 	bool IsLivingEnemy(const AActor* Candidate) const;
 	FName FindAvailableTechnique(ECombatTechniqueKind Kind, FName Preferred) const;
 	void UpdateMovementRequest();
+	void ClearAttackPlan(const TCHAR* Reason, bool bCancelExecution);
+	void ChooseAttackPlan(AActor* Target, float Now);
+	void SetMovementMode(EIronboundAIMovementMode NewMode, const TCHAR* Reason);
+	void DrawRejectedOpportunity() const;
+	void SuspendFailedClosePursuit();
 	void PublishIntent(const TCHAR* Intent, const AActor* Target = nullptr);
 	float GetEffectiveDecisionInterval() const;
 	float GetEffectiveReactionDelay() const;
@@ -121,4 +160,23 @@ private:
 	float PendingThreatStartWorldTime = 0.f;
 	float NextPathRequestWorldTime = 0.f;
 	bool bHasMoveGoal = false;
+	bool bMoveRequestActive = false;
+	bool bHadActiveDeliberate = false;
+	bool bPlanEverCommitted = false;
+	bool bLoggedNoDeliberateTechnique = false;
+	bool bClosingForOpportunity = false;
+	bool bHasRejectedOpportunity = false;
+	FBladeTrajectory RejectedTrajectory;
+	FCombatAttackOpportunity RejectedOpportunity;
+	float RejectedContactToleranceCm = 0.f;
+	int32 NextPlanId = 1;
+	int32 ActivePlanId = 0;
+	int32 PursuitIntentId = 0;
+	int32 ConsecutivePathFailures = 0;
+	int32 ConsecutiveFailedPlans = 0;
+	FVector FailedPlanTargetLocation = FVector::ZeroVector;
+	FVector FailedPlanAttackerLocation = FVector::ZeroVector;
+	EIronboundAIMovementMode MovementMode = EIronboundAIMovementMode::Idle;
+	FCombatAttackOpportunity ActiveOpportunity;
+	TWeakObjectPtr<AActor> PlannedTarget;
 };

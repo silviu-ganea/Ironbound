@@ -99,6 +99,24 @@ struct FBladeTrajectory
 	bool bValid = false;
 };
 
+/** A geometry query result; execution still validates and admits it. */
+USTRUCT(BlueprintType)
+struct IRONBOUND_API FCombatAttackOpportunity
+{
+	GENERATED_BODY()
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") bool bFeasible = false;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") FName TechniqueId;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") FName Region;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") FName Bone;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") FTransform Stance = FTransform::Identity;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") FVector TargetLocationAtQuery = FVector::ZeroVector;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") int32 ContactSample = INDEX_NONE;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float MissCm = 1000000.f;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float ContactScore = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float Quality = 0.f;
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float MovementCostCm = 0.f;
+};
+
 /**
  * Runtime trajectory analysis and attack-alignment solving.
  *
@@ -111,6 +129,14 @@ class IRONBOUND_API UCombatTrajectoryLibrary : public UBlueprintFunctionLibrary
 	GENERATED_BODY()
 
 public:
+	/** Query the current position and bounded nearby stances with the shared contact evaluator. */
+	static void FindAttackOpportunities(
+		USkeletalMeshComponent* AttackerMesh, USkeletalMeshComponent* VictimMesh,
+		const FBladeTrajectory& Trajectory, const UDataTable* CombatTargets,
+		FName TechniqueId, FName RequiredRegion, float AimPointAlongBlade,
+		float AimWindowStartFraction, float AimWindowEndFraction,
+		float FacingLimitDegrees, float ContactToleranceCm, float MaxNearbyMoveCm,
+		FCombatAttackOpportunity& OutCurrent, FCombatAttackOpportunity& OutNearby);
 	/**
 	 * Analyze the complete source animation and derive its active blade path.
 	 * Sampling count and active strike window are determined internally.

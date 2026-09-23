@@ -3,6 +3,8 @@
 #include "Combat/BattleManager.h"
 #include "Combat/CombatExecutionComponent.h"
 #include "Combat/CombatExecutionTypes.h"
+#include "Combat/CombatEquipmentComponent.h"
+#include "Combat/CombatTechniqueExecutionConfigs.h"
 #include "Combat/CombatFocusComponent.h"
 #include "Combat/CombatTechniqueComponent.h"
 #include "Combat/CombatTechniqueRow.h"
@@ -13,6 +15,8 @@
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "DrawDebugHelpers.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "TimerManager.h"
 #include "Ironbound.h"
@@ -33,6 +37,19 @@ void AIronboundCombatAIController::OnPossess(APawn* InPawn)
 	PendingThreatTechnique = NAME_None;
 	LastAnsweredThreatTechnique = NAME_None;
 	bHasMoveGoal = false;
+	bMoveRequestActive = false;
+	bHadActiveDeliberate = false;
+	bPlanEverCommitted = false;
+	bLoggedNoDeliberateTechnique = false;
+	bClosingForOpportunity = false;
+	bHasRejectedOpportunity = false;
+	ActivePlanId = 0;
+	PursuitIntentId = 0;
+	ConsecutiveFailedPlans = 0;
+	ConsecutivePathFailures = 0;
+	ActiveOpportunity = FCombatAttackOpportunity();
+	PlannedTarget.Reset();
+	MovementMode = EIronboundAIMovementMode::Idle;
 	LastIntent.Reset();
 	NextDecisionWorldTime = 0.f;
 	NextDeliberateAttemptWorldTime = 0.f;
@@ -60,6 +77,7 @@ void AIronboundCombatAIController::OnUnPossess()
 	}
 
 	StopMovement();
+	ClearAttackPlan(TEXT("Unpossessed"), false);
 	CurrentTarget.Reset();
 	PendingThreatAttacker.Reset();
 	LastAnsweredThreatAttacker.Reset();
@@ -225,6 +243,271 @@ float AIronboundCombatAIController::GetEffectiveReactionDelay() const
 		BaseReactionDelaySeconds - AgilityAboveBaseline * AgilityReactionBonusSeconds);
 }
 
+FVector AIronboundCombatAIController::ResolveCombatMovementFacing(FVector TravelIntent) const
+{
+	if (MovementMode == EIronboundAIMovementMode::Pursuit ||
+		MovementMode == EIronboundAIMovementMode::Idle)
+	{
+		return TravelIntent;
+	}
+	if (MovementMode == EIronboundAIMovementMode::AttackAlignment && ActiveOpportunity.bFeasible)
+	{
+		return ActiveOpportunity.Stance.GetRotation().GetForwardVector();
+	}
+	if (MovementMode == EIronboundAIMovementMode::GuardManeuver && PlannedTarget.IsValid() && GetPawn())
+	{
+		FVector Facing = (PlannedTarget->GetActorLocation() - GetPawn()->GetActorLocation()).GetSafeNormal2D();
+		if (const USkeletalMeshComponent* Mesh = GetPawn()->FindComponentByClass<USkeletalMeshComponent>())
+		{
+			Facing = FRotator(0.f, Facing.Rotation().Yaw - Mesh->GetRelativeRotation().Yaw, 0.f).Vector();
+		}
+		return Facing;
+	}
+	return Execution ? Execution->ResolveOrientationIntent(TravelIntent) : TravelIntent;
+}
+
+void AIronboundCombatAIController::SetMovementMode(EIronboundAIMovementMode NewMode, const TCHAR* Reason)
+{
+	if (MovementMode == NewMode) return;
+	if (NewMode == EIronboundAIMovementMode::Pursuit)
+	{
+		PursuitIntentId = NextPlanId++;
+		UE_LOG(LogIronboundCombat, Log,
+			TEXT("[AI] DECISION %d Trigger=%s Target=%s Intent=Pursuit"),
+			PursuitIntentId, Reason, *GetNameSafe(CurrentTarget.Get()));
+	}
+	MovementMode = NewMode;
+	const TCHAR* ModeName = TEXT("Idle");
+	switch (NewMode)
+	{
+	case EIronboundAIMovementMode::Pursuit: ModeName = TEXT("PursuitFacingTravel"); break;
+	case EIronboundAIMovementMode::GuardManeuver: ModeName = TEXT("GuardTargetFacingStrafe"); break;
+	case EIronboundAIMovementMode::AttackAlignment: ModeName = TEXT("AttackAlignmentFacingStance"); break;
+	case EIronboundAIMovementMode::CommittedAttack: ModeName = TEXT("CommittedExecutionOwnsMovement"); break;
+	default: break;
+	}
+	UE_LOG(LogIronboundCombat, Log, TEXT("[AI] MOVEMENT PlanId=%d Mode=%s Reason=%s"),
+		NewMode == EIronboundAIMovementMode::Pursuit ? PursuitIntentId : ActivePlanId, ModeName, Reason);
+	if (NewMode == EIronboundAIMovementMode::GuardManeuver && PlannedTarget.IsValid())
+	{
+		SetFocus(PlannedTarget.Get());
+	}
+	else if (NewMode == EIronboundAIMovementMode::Pursuit || NewMode == EIronboundAIMovementMode::Idle)
+	{
+		ClearFocus(EAIFocusPriority::Gameplay);
+	}
+}
+
+void AIronboundCombatAIController::DrawRejectedOpportunity() const
+{
+	UWorld* World = GetWorld();
+	if (!bHasRejectedOpportunity || !World ||
+		RejectedTrajectory.Segments.IsEmpty() ||
+		RejectedOpportunity.ContactSample == INDEX_NONE)
+	{
+		return;
+	}
+	const FTransform& Stance = RejectedOpportunity.Stance;
+	DrawDebugSphere(World, Stance.GetLocation(), 10.f, 10, FColor::Orange, false, 0.25f);
+	for (int32 Index = 1; Index < RejectedTrajectory.Segments.Num(); ++Index)
+	{
+		DrawDebugLine(World,
+			Stance.TransformPosition(RejectedTrajectory.Segments[Index - 1].Tip),
+			Stance.TransformPosition(RejectedTrajectory.Segments[Index].Tip),
+			FColor::Orange, false, 0.25f, 0, 1.5f);
+	}
+	DrawDebugString(World, Stance.GetLocation() + FVector(0.f, 0.f, 95.f),
+		FString::Printf(TEXT("No hit: %.1f / %.1f cm (closest candidate)"),
+			RejectedOpportunity.MissCm, RejectedContactToleranceCm),
+		nullptr, FColor::Orange, 0.25f, false);
+}
+
+void AIronboundCombatAIController::SuspendFailedClosePursuit()
+{
+	if (!bClosingForOpportunity || ConsecutivePathFailures < 3 || !GetPawn()) return;
+	ConsecutiveFailedPlans = 3;
+	FailedPlanTargetLocation = CurrentTarget.IsValid()
+		? CurrentTarget->GetActorLocation() : FVector::ZeroVector;
+	FailedPlanAttackerLocation = GetPawn()->GetActorLocation();
+	bClosingForOpportunity = false;
+	UE_LOG(LogIronboundCombat, Warning,
+		TEXT("[AI] PLANNING SUSPENDED Reason=CloseApproachNavigationFailed failures=%d"),
+		ConsecutivePathFailures);
+	StopMovement();
+	bHasMoveGoal = false;
+	bMoveRequestActive = false;
+	SetMovementMode(EIronboundAIMovementMode::Idle, TEXT("CloseApproachNavigationFailed"));
+}
+
+void AIronboundCombatAIController::ClearAttackPlan(const TCHAR* Reason, bool bCancelExecution)
+{
+	if (ActivePlanId != 0)
+	{
+		UE_LOG(LogIronboundCombat, Log,
+			TEXT("[AI] PLAN TERMINAL PlanId=%d Reason=%s Committed=%d"),
+			ActivePlanId, Reason, bPlanEverCommitted ? 1 : 0);
+		if (FCString::Strcmp(Reason, TEXT("AttackRecovered")) == 0)
+		{
+			ConsecutiveFailedPlans = 0;
+			ConsecutivePathFailures = 0;
+		}
+		else if (!bPlanEverCommitted &&
+			FCString::Strcmp(Reason, TEXT("TargetChanged")) != 0 &&
+			FCString::Strcmp(Reason, TEXT("TargetUnavailable")) != 0 &&
+			FCString::Strcmp(Reason, TEXT("OwnerDied")) != 0 &&
+			FCString::Strcmp(Reason, TEXT("Unpossessed")) != 0)
+		{
+			++ConsecutiveFailedPlans;
+			FailedPlanTargetLocation = PlannedTarget.IsValid()
+				? PlannedTarget->GetActorLocation() : FVector::ZeroVector;
+			FailedPlanAttackerLocation = GetPawn() ? GetPawn()->GetActorLocation() : FVector::ZeroVector;
+			if (ConsecutiveFailedPlans >= 3)
+			{
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[AI] PLANNING SUSPENDED failedPlans=%d Reason=RepeatedFailure WaitingForTargetDisplacement"),
+					ConsecutiveFailedPlans);
+			}
+		}
+	}
+	if (bCancelExecution && Execution && !Execution->IsCommitted())
+	{
+		Execution->CancelPlannedExecution(ActivePlanId, Reason);
+	}
+	StopMovement();
+	bHasMoveGoal = false;
+	bMoveRequestActive = false;
+	bHadActiveDeliberate = false;
+	bPlanEverCommitted = false;
+	ActivePlanId = 0;
+	ActiveOpportunity = FCombatAttackOpportunity();
+	PlannedTarget.Reset();
+	bHasRejectedOpportunity = false;
+	bClosingForOpportunity = false;
+	SetMovementMode(EIronboundAIMovementMode::Idle, Reason);
+}
+
+void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
+{
+	const FName TechniqueId = FindAvailableTechnique(ECombatTechniqueKind::Deliberate,
+		PreferredDeliberateTechnique);
+	NextDeliberateAttemptWorldTime = Now + FMath::Max(0.05f, DeliberateRetryIntervalSeconds);
+	if (TechniqueId.IsNone() && bLoggedNoDeliberateTechnique) return;
+	const int32 DecisionId = NextPlanId++;
+	auto RecordPlanningFailure = [&]()
+	{
+		++ConsecutiveFailedPlans;
+		FailedPlanTargetLocation = Target->GetActorLocation();
+		FailedPlanAttackerLocation = GetPawn()->GetActorLocation();
+		if (ConsecutiveFailedPlans >= 3)
+		{
+			UE_LOG(LogIronboundCombat, Warning,
+				TEXT("[AI] PLANNING SUSPENDED failedPlans=%d Reason=RepeatedUnviableOpportunity WaitingForTargetDisplacement"),
+				ConsecutiveFailedPlans);
+		}
+	};
+	if (TechniqueId.IsNone())
+	{
+		if (!bLoggedNoDeliberateTechnique)
+		{
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[AI] DECISION %d Target=%s Result=NoAvailableDeliberateTechnique"),
+				DecisionId, *GetNameSafe(Target));
+			bLoggedNoDeliberateTechnique = true;
+		}
+		return;
+	}
+	bLoggedNoDeliberateTechnique = false;
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[AI] DECISION %d Trigger=ReadyAfterRecoveryOrInvalidation Target=%s Technique=%s"),
+		DecisionId, *GetNameSafe(Target), *TechniqueId.ToString());
+	const FCombatTechniqueRow* Row = Techniques->FindRow(TechniqueId);
+	const UExecConfig_MeleeStrike* Config = Row ? Cast<UExecConfig_MeleeStrike>(Row->ExecutionConfig) : nullptr;
+	UCombatEquipmentComponent* Equipment = GetPawn()->FindComponentByClass<UCombatEquipmentComponent>();
+	USkeletalMeshComponent* AttackerMesh = GetPawn()->FindComponentByClass<USkeletalMeshComponent>();
+	USkeletalMeshComponent* TargetMesh = Target->FindComponentByClass<USkeletalMeshComponent>();
+	FBladeTrajectory Trajectory;
+	if (!Config || !Equipment || !AttackerMesh || !TargetMesh ||
+		!Equipment->GetTrajectory(Config->SourceSequence, Trajectory))
+	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("[AI] CHOICE PlanId=%d Result=PlanningInputsUnavailable"), DecisionId);
+		return;
+	}
+	const FName RequiredRegion = PreferredAttackTargetRegion.IsNone()
+		? Config->DefaultTargetRegion : PreferredAttackTargetRegion;
+	FCombatAttackOpportunity Current, Nearby;
+	UCombatTrajectoryLibrary::FindAttackOpportunities(AttackerMesh, TargetMesh, Trajectory,
+		Config->CombatTargets, TechniqueId, RequiredRegion, Config->AimPointAlongBlade,
+		Config->AimWindowStartFraction, Config->AimWindowEndFraction,
+		Config->MaxFacingDeviationFromTargetDegrees, Config->ContactToleranceCm,
+		MaxNearbyMoveCm, Current, Nearby);
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[AI] OPPORTUNITIES PlanId=%d Current feasible=%d region=%s bone=%s quality=%.1f miss=%.1fcm; Nearby feasible=%d region=%s bone=%s quality=%.1f miss=%.1fcm move=%.1fcm stance=%s"),
+		DecisionId, Current.bFeasible ? 1 : 0, *Current.Region.ToString(), *Current.Bone.ToString(),
+		Current.Quality, Current.MissCm, Nearby.bFeasible ? 1 : 0,
+		*Nearby.Region.ToString(), *Nearby.Bone.ToString(), Nearby.Quality, Nearby.MissCm,
+		Nearby.MovementCostCm, *Nearby.Stance.GetLocation().ToCompactString());
+	const float Improvement = Nearby.Quality - Nearby.MovementCostCm * 0.08f - Current.Quality;
+	const bool bNearbyUseful = Nearby.bFeasible &&
+		(!Current.bFeasible || Improvement >= MeaningfulQualityGain);
+	const float Roll = Current.bFeasible && bNearbyUseful ? FMath::FRand() : -1.f;
+	const bool bReposition = bNearbyUseful && (!Current.bFeasible || Roll < RepositionPreference);
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[AI] POLICY PlanId=%d RepositionPreference=%.2f Roll=%.3f ImprovementAfterMove=%.1f"),
+		DecisionId, RepositionPreference, Roll, Improvement);
+	if (!Current.bFeasible && !Nearby.bFeasible)
+	{
+		RejectedTrajectory = Trajectory;
+		RejectedOpportunity = Nearby.ContactSample != INDEX_NONE ? Nearby : Current;
+		RejectedContactToleranceCm = Config->ContactToleranceCm;
+		bHasRejectedOpportunity = RejectedOpportunity.ContactSample != INDEX_NONE;
+		const float Distance = FVector::Dist2D(GetPawn()->GetActorLocation(), Target->GetActorLocation());
+		if (Distance > CloseApproachDistanceCm)
+		{
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[AI] CHOICE PlanId=%d Intent=CloseForOpportunity Reason=NoViableContactAtPlanningBoundary distance=%.1fcm closeAt=%.1fcm nearestMiss=%.1f/%.1fcm"),
+				DecisionId, Distance, CloseApproachDistanceCm,
+				RejectedOpportunity.MissCm, Config->ContactToleranceCm);
+			bClosingForOpportunity = true;
+			ConsecutivePathFailures = 0;
+			SetMovementMode(EIronboundAIMovementMode::Pursuit,
+				TEXT("NoNearbyContactAtPlanningBoundary"));
+			return;
+		}
+		UE_LOG(LogIronboundCombat, Log,
+			TEXT("[AI] CHOICE PlanId=%d Result=NoViableOpportunity Reason=CurrentAndNearbyContactInvalid"), DecisionId);
+		RecordPlanningFailure();
+		return;
+	}
+	bHasRejectedOpportunity = false;
+	bClosingForOpportunity = false;
+	ActiveOpportunity = bReposition ? Nearby : Current;
+	ActivePlanId = DecisionId;
+	PlannedTarget = Target;
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[AI] CHOICE PlanId=%d Intent=%s Reason=%s region=%s bone=%s quality=%.1f move=%.1fcm destination=%s yaw=%.1f"),
+		ActivePlanId, bReposition ? TEXT("RepositionForAttack") : TEXT("AttackFromCurrentPosition"),
+		bReposition ? (Current.bFeasible ? TEXT("UsefulImprovementWonPolicyRoll") : TEXT("CurrentCannotHitNearbyCan"))
+			: (bNearbyUseful ? TEXT("CurrentAttackWonPolicyRoll") : TEXT("CurrentAttackGoodRepositionNotWorthCost")),
+		*ActiveOpportunity.Region.ToString(), *ActiveOpportunity.Bone.ToString(),
+		ActiveOpportunity.Quality, ActiveOpportunity.MovementCostCm,
+		*ActiveOpportunity.Stance.GetLocation().ToCompactString(), ActiveOpportunity.Stance.Rotator().Yaw);
+	FCombatTechniqueRequest Request;
+	Request.TechniqueId = TechniqueId;
+	Request.Target = Target;
+	Request.TargetRegion = RequiredRegion;
+	Request.PlannedOpportunity = ActiveOpportunity;
+	Request.PlanId = ActivePlanId;
+	if (!Execution->RequestTechnique(Request))
+	{
+		ClearAttackPlan(TEXT("ExecutionRefusedSelectedOpportunity"), false);
+		return;
+	}
+	bHadActiveDeliberate = true;
+	SetMovementMode(bReposition ? EIronboundAIMovementMode::GuardManeuver :
+		EIronboundAIMovementMode::AttackAlignment, TEXT("SelectedOpportunityAdmitted"));
+}
+
 void AIronboundCombatAIController::DecisionStep()
 {
 	APawn* ControlledPawn = GetPawn();
@@ -232,6 +515,7 @@ void AIronboundCombatAIController::DecisionStep()
 	{
 		return;
 	}
+	DrawRejectedOpportunity();
 
 	if (!Fighter || !Vitals || !Focus || !Execution || !Techniques)
 	{
@@ -253,6 +537,7 @@ void AIronboundCombatAIController::DecisionStep()
 
 	if (Vitals->IsDead())
 	{
+		ClearAttackPlan(TEXT("OwnerDied"), false);
 		StopMovement();
 		PublishIntent(TEXT("Dead"));
 		return;
@@ -261,6 +546,7 @@ void AIronboundCombatAIController::DecisionStep()
 	AActor* Target = SelectEnemy();
 	if (!Target)
 	{
+		ClearAttackPlan(TEXT("TargetUnavailable"), true);
 		CurrentTarget.Reset();
 		PendingThreatAttacker.Reset();
 		LastAnsweredThreatAttacker.Reset();
@@ -335,30 +621,65 @@ void AIronboundCombatAIController::DecisionStep()
 		PendingThreatStartWorldTime = 0.f;
 	}
 
-	const bool bHasActiveDeliberate =
-		!Execution->HasAdmissionSlot(ECombatExecutionKind::Deliberate);
-	if (!bHasActiveDeliberate && Now >= NextDeliberateAttemptWorldTime)
+	const bool bHasActiveDeliberate = !Execution->HasAdmissionSlot(ECombatExecutionKind::Deliberate);
+	if (ActivePlanId != 0 && PlannedTarget.Get() != Target && !Execution->IsCommitted())
 	{
-		const FName AttackTechnique = FindAvailableTechnique(
-			ECombatTechniqueKind::Deliberate,
-			PreferredDeliberateTechnique);
-		if (!AttackTechnique.IsNone())
+		ClearAttackPlan(TEXT("TargetChanged"), true);
+	}
+	if (ActivePlanId != 0 && bHasActiveDeliberate && !Execution->IsCommitted() &&
+		FVector::Dist2D(Target->GetActorLocation(), ActiveOpportunity.TargetLocationAtQuery) >
+			TargetDisplacementToleranceCm)
+	{
+		ClearAttackPlan(TEXT("TargetDisplacedBeyondPlanTolerance"), true);
+	}
+	if (ActivePlanId != 0 && bHasActiveDeliberate && Execution->IsCommitted() && !bPlanEverCommitted)
+	{
+		bPlanEverCommitted = true;
+		SetMovementMode(EIronboundAIMovementMode::CommittedAttack, TEXT("StrikeCommitted"));
+		UE_LOG(LogIronboundCombat, Log, TEXT("[AI] EXECUTION PlanId=%d Result=Committed"), ActivePlanId);
+	}
+	if (ActivePlanId != 0 && bHadActiveDeliberate && !bHasActiveDeliberate)
+	{
+		const bool bRecovered = bPlanEverCommitted;
+		ClearAttackPlan(bRecovered ? TEXT("AttackRecovered") : TEXT("ExecutionTerminatedBeforeCommit"), false);
+		NextDeliberateAttemptWorldTime = bRecovered ? Now : Now + DeliberateRetryIntervalSeconds;
+	}
+	if (!bHasActiveDeliberate && ActivePlanId == 0)
+	{
+		const float Distance = FVector::Dist2D(ControlledPawn->GetActorLocation(), Target->GetActorLocation());
+		const float DecisionRange = bClosingForOpportunity
+			? FMath::Min(CloseApproachDistanceCm, PlanningRangeCm) : PlanningRangeCm;
+		if (Distance > DecisionRange)
 		{
-			FCombatTechniqueRequest Request;
-			Request.TechniqueId = AttackTechnique;
-			Request.Target = Target;
-			Request.TargetRegion = PreferredAttackTargetRegion;
-
-			NextDeliberateAttemptWorldTime = Now + FMath::Max(0.05f, DeliberateRetryIntervalSeconds);
-			if (Execution->CanExecuteTechnique(Request) && Execution->RequestTechnique(Request))
+			SetMovementMode(EIronboundAIMovementMode::Pursuit,
+				bClosingForOpportunity ? TEXT("ClosingForOpportunity") : TEXT("TargetOutsidePlanningRange"));
+		}
+		else if (Now >= NextDeliberateAttemptWorldTime)
+		{
+			if (ConsecutiveFailedPlans >= 3)
 			{
-				const FCombatTechniqueRow* Row = Techniques->FindRow(AttackTechnique);
-				PublishIntent(
-					*FString::Printf(TEXT("Attack: %s -> %s"),
-						Row ? *Row->DisplayName.ToString() : TEXT("technique"),
-						Request.TargetRegion.IsNone() ? TEXT("technique default") : *Request.TargetRegion.ToString()),
-					Target);
+				if (FVector::Dist2D(Target->GetActorLocation(), FailedPlanTargetLocation) <=
+					TargetDisplacementToleranceCm &&
+					FVector::Dist2D(ControlledPawn->GetActorLocation(), FailedPlanAttackerLocation) <=
+					TargetDisplacementToleranceCm)
+				{
+					UpdateMovementRequest();
+					return;
+				}
+				UE_LOG(LogIronboundCombat, Log,
+					TEXT("[AI] PLANNING RESUMED Reason=FighterOrTargetDisplacedAfterRepeatedFailure"));
+				ConsecutiveFailedPlans = 0;
+				ConsecutivePathFailures = 0;
 			}
+			if (MovementMode == EIronboundAIMovementMode::Pursuit)
+			{
+				StopMovement();
+				bHasMoveGoal = false;
+				bMoveRequestActive = false;
+				SetMovementMode(EIronboundAIMovementMode::Idle, TEXT("EnteredPlanningRange"));
+			}
+			bClosingForOpportunity = false;
+			ChooseAttackPlan(Target, Now);
 		}
 	}
 
@@ -366,6 +687,7 @@ void AIronboundCombatAIController::DecisionStep()
 
 	if (Execution->IsAligning())
 	{
+		SetMovementMode(EIronboundAIMovementMode::AttackAlignment, TEXT("ArrivedAtSelectedStance"));
 		PublishIntent(TEXT("Aligning attack"), Target);
 	}
 	else if (!Execution->HasAdmissionSlot(ECombatExecutionKind::Deliberate))
@@ -375,6 +697,10 @@ void AIronboundCombatAIController::DecisionStep()
 	else if (Execution->IsExecutingReactive())
 	{
 		PublishIntent(TEXT("Holding parry"), Target);
+	}
+	else if (bClosingForOpportunity)
+	{
+		PublishIntent(TEXT("Closing for attack opportunity"), Target);
 	}
 	else if (FindAvailableTechnique(ECombatTechniqueKind::Deliberate, PreferredDeliberateTechnique).IsNone())
 	{
@@ -388,67 +714,118 @@ void AIronboundCombatAIController::DecisionStep()
 
 void AIronboundCombatAIController::UpdateMovementRequest()
 {
-	if (!Execution)
+	if (!Execution || !GetPawn())
 	{
 		return;
 	}
-
-	FCombatEngagementRequirement Requirement = Execution->GetEngagementRequirement();
-	if (!Requirement.bHasRequirement || !Requirement.bMayMoveDuringExecution)
+	const FCombatEngagementRequirement Requirement = Execution->GetEngagementRequirement();
+	if (ActivePlanId != 0 && !Execution->IsCommitted() &&
+		MovementMode == EIronboundAIMovementMode::AttackAlignment &&
+		Requirement.bHasRequirement && Requirement.bMayMoveDuringExecution)
+	{
+		SetMovementMode(EIronboundAIMovementMode::GuardManeuver,
+			TEXT("LeftStanceBeforeCommit"));
+	}
+	const bool bPursuit = MovementMode == EIronboundAIMovementMode::Pursuit && CurrentTarget.IsValid();
+	const bool bGuardMove = ActivePlanId != 0 &&
+		MovementMode == EIronboundAIMovementMode::GuardManeuver &&
+		Requirement.bHasRequirement && Requirement.bMayMoveDuringExecution;
+	if (!bPursuit && !bGuardMove)
 	{
 		if (GetMoveStatus() != EPathFollowingStatus::Idle)
 		{
 			StopMovement();
 		}
 		bHasMoveGoal = false;
+		bMoveRequestActive = false;
 		return;
 	}
-
-	const float AcceptanceRadius = FMath::Max(1.f, Requirement.ArrivalTolerance);
-	if (FVector::DistSquared2D(GetPawn()->GetActorLocation(), Requirement.DesiredLocation) <=
+	const FVector Goal = bPursuit ? CurrentTarget->GetActorLocation() : Requirement.DesiredLocation;
+	const float AcceptanceRadius = bPursuit
+		? (bClosingForOpportunity ? FMath::Min(CloseApproachDistanceCm, PlanningRangeCm)
+			: PlanningRangeCm) * 0.75f :
+		FMath::Max(1.f, Requirement.ArrivalTolerance);
+	if (FVector::DistSquared2D(GetPawn()->GetActorLocation(), Goal) <=
 		FMath::Square(AcceptanceRadius))
 	{
 		if (GetMoveStatus() != EPathFollowingStatus::Idle)
 		{
 			StopMovement();
 		}
-		LastMoveGoal = Requirement.DesiredLocation;
+		LastMoveGoal = Goal;
 		bHasMoveGoal = true;
+		bMoveRequestActive = false;
 		return;
 	}
 
 	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	if (bMoveRequestActive && GetMoveStatus() == EPathFollowingStatus::Idle)
+	{
+		bMoveRequestActive = false;
+		++ConsecutivePathFailures;
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("[AI] NAVIGATION PlanId=%d Result=PathEndedBeforeArrival failures=%d goal=%s"),
+			bPursuit ? PursuitIntentId : ActivePlanId, ConsecutivePathFailures, *Goal.ToCompactString());
+		if (bGuardMove)
+		{
+			ClearAttackPlan(TEXT("StanceNavigationFailed"), true);
+			NextDeliberateAttemptWorldTime = Now + DeliberateRetryIntervalSeconds *
+				FMath::Min(3, ConsecutivePathFailures + 1);
+			return;
+		}
+		if (bPursuit)
+		{
+			SuspendFailedClosePursuit();
+			if (MovementMode != EIronboundAIMovementMode::Pursuit) return;
+		}
+	}
 	const bool bGoalChanged = !bHasMoveGoal ||
-		FVector::DistSquared(LastMoveGoal, Requirement.DesiredLocation) >
+		FVector::DistSquared(LastMoveGoal, Goal) >
 		FMath::Square(MovementGoalUpdateDistanceCm);
 	const bool bRetryReady = GetMoveStatus() == EPathFollowingStatus::Idle &&
 		Now >= NextPathRequestWorldTime;
 	if (bGoalChanged || bRetryReady)
 	{
-		LastMoveGoal = Requirement.DesiredLocation;
+		LastMoveGoal = Goal;
 		bHasMoveGoal = true;
 		NextPathRequestWorldTime = Now + FMath::Max(0.f, FailedPathRetryDelaySeconds);
 		const EPathFollowingRequestResult::Type MoveResult = MoveToLocation(
-			Requirement.DesiredLocation,
+			Goal,
 			AcceptanceRadius,
 			false,  // Do not inflate the executor's authored root arrival tolerance.
 			true,   // Use Navigation System paths; NavMover feeds the path into Mover.
 			true,
-			true,   // Strafe is handled by movement orientation intent, not actor rotation writes.
+			bGuardMove, // Guard keeps target focus; pursuit follows travel direction.
 			nullptr,
 			false); // Partial paths do not satisfy a combat stance requirement.
 		if (MoveResult == EPathFollowingRequestResult::Failed)
 		{
+			++ConsecutivePathFailures;
 			UE_LOG(LogIronboundCombat, Warning,
-				TEXT("Combat AI [%s]: navigation could not reach combat stance %s"),
-				*GetNameSafe(GetPawn()), *Requirement.DesiredLocation.ToCompactString());
+				TEXT("[AI] NAVIGATION PlanId=%d Result=RequestFailed mode=%s goal=%s failures=%d"),
+				bPursuit ? PursuitIntentId : ActivePlanId, bGuardMove ? TEXT("GuardManeuver") : TEXT("Pursuit"),
+				*Goal.ToCompactString(), ConsecutivePathFailures);
+			if (bGuardMove)
+			{
+				ClearAttackPlan(TEXT("StanceUnreachable"), true);
+				NextDeliberateAttemptWorldTime = Now + DeliberateRetryIntervalSeconds *
+					FMath::Min(3, ConsecutivePathFailures + 1);
+			}
+			else if (bPursuit)
+			{
+				SuspendFailedClosePursuit();
+			}
 		}
-		else if (bGoalChanged)
+		else
 		{
+			bMoveRequestActive = MoveResult == EPathFollowingRequestResult::RequestSuccessful;
+			if (bGoalChanged)
+			{
 			UE_LOG(LogIronboundCombat, Log,
-				TEXT("Combat AI [%s]: moving to combat stance %s (arrival %.1fcm)"),
-				*GetNameSafe(GetPawn()), *Requirement.DesiredLocation.ToCompactString(),
-				AcceptanceRadius);
+				TEXT("[AI] NAVIGATION PlanId=%d Mode=%s goal=%s arrival=%.1fcm result=%d"),
+				bPursuit ? PursuitIntentId : ActivePlanId, bGuardMove ? TEXT("GuardTargetFacingStrafe") : TEXT("PursuitFacingTravel"),
+				*Goal.ToCompactString(), AcceptanceRadius, int32(MoveResult));
+			}
 		}
 	}
 }

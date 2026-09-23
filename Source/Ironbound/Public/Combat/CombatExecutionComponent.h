@@ -177,6 +177,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Combat|Techniques")
 	void CancelAllExecutions();
 
+	/** Cancel one uncommitted planned execution without disturbing simultaneous reactive records. */
+	void CancelPlannedExecution(int32 PlanId, const TCHAR* Reason);
+
 	virtual void BeginPlay() override;
 
 	virtual void TickComponent(

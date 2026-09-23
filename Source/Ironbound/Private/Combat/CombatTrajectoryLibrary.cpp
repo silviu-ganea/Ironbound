@@ -772,6 +772,116 @@ bool UCombatTrajectoryLibrary::
 }
 
 
+void UCombatTrajectoryLibrary::FindAttackOpportunities(
+	USkeletalMeshComponent* AttackerMesh, USkeletalMeshComponent* VictimMesh,
+	const FBladeTrajectory& Trajectory, const UDataTable* CombatTargets,
+	FName TechniqueId, FName RequiredRegion, float AimPointAlongBlade,
+	float AimWindowStartFraction, float AimWindowEndFraction,
+	float FacingLimitDegrees, float ContactToleranceCm, float MaxNearbyMoveCm,
+	FCombatAttackOpportunity& OutCurrent, FCombatAttackOpportunity& OutNearby)
+{
+	OutCurrent = FCombatAttackOpportunity();
+	OutNearby = FCombatAttackOpportunity();
+	if (!AttackerMesh || !VictimMesh || !CombatTargets || !Trajectory.bValid)
+	{
+		return;
+	}
+	const AActor* Attacker = AttackerMesh->GetOwner();
+	const AActor* Victim = VictimMesh->GetOwner();
+	if (!Attacker || !Victim)
+	{
+		return;
+	}
+	const FVector Origin = Attacker->GetActorLocation();
+	const FVector Target = Victim->GetActorLocation();
+	const float CurrentDistance = FVector::Dist2D(Origin, Target);
+	const float FacingLimit = FMath::Clamp(FacingLimitDegrees, 0.f, 180.f);
+	const auto* AttackerCapsule = Attacker->FindComponentByClass<UCapsuleComponent>();
+	const auto* VictimCapsule = Victim->FindComponentByClass<UCapsuleComponent>();
+	const float MinimumDistance =
+		(AttackerCapsule ? AttackerCapsule->GetScaledCapsuleRadius() : 0.f) +
+		(VictimCapsule ? VictimCapsule->GetScaledCapsuleRadius() : 0.f) + GStandoffClearance;
+	const float MaximumDistance = FMath::Max(MinimumDistance,
+		Trajectory.ReachMax * Attacker->GetActorScale3D().GetAbsMax()) + GStandoffBeyondReach;
+	const float MaxMove = FMath::Max(0.f, MaxNearbyMoveCm);
+
+	auto Evaluate = [&](const FVector& Location, float Yaw, FCombatAttackOpportunity& Best, bool bCurrent)
+	{
+		const FVector Toward = (Target - Location).GetSafeNormal2D();
+		if (Toward.IsNearlyZero() ||
+			FMath::Abs(FMath::FindDeltaAngleDegrees(Toward.Rotation().Yaw, Yaw)) > FacingLimit + 0.01f)
+		{
+			return;
+		}
+		const float MoveCost = FVector::Dist2D(Origin, Location);
+		if (!bCurrent && (MoveCost > MaxMove || MoveCost < 10.f))
+		{
+			return;
+		}
+		FTransform Stance(FRotator(0.f, Yaw, 0.f), Location, Attacker->GetActorScale3D());
+		FName Region, Bone;
+		int32 Sample = INDEX_NONE;
+		float Score = 0.f;
+		const float Miss = EvaluateScoredContact(Trajectory, Stance, VictimMesh, CombatTargets,
+			Region, Bone, Sample, Score, RequiredRegion, AimPointAlongBlade,
+			AimWindowStartFraction, AimWindowEndFraction);
+		const bool bFeasible = Sample != INDEX_NONE && Miss <= ContactToleranceCm;
+		const float Quality = bFeasible
+			? (IsPrimaryContactBone(Bone) ? 20.f : 0.f) + Score * 10.f - Miss * 0.2f
+			: 0.f;
+		const float Utility = Quality - MoveCost * 0.08f;
+		const float BestUtility = Best.Quality - Best.MovementCostCm * 0.08f;
+		if ((!bFeasible && Best.bFeasible) ||
+			(bFeasible && Best.bFeasible && Utility <= BestUtility + KINDA_SMALL_NUMBER) ||
+			(!bFeasible && !Best.bFeasible && Miss >= Best.MissCm))
+		{
+			return;
+		}
+		Best.bFeasible = bFeasible;
+		Best.TechniqueId = TechniqueId;
+		Best.Region = Region;
+		Best.Bone = Bone;
+		Best.Stance = Stance;
+		Best.TargetLocationAtQuery = Target;
+		Best.ContactSample = Sample;
+		Best.MissCm = Miss;
+		Best.ContactScore = Score;
+		Best.Quality = Quality;
+		Best.MovementCostCm = MoveCost;
+	};
+
+	const float CurrentFacing = (Target - Origin).GetSafeNormal2D().Rotation().Yaw;
+	Evaluate(Origin, Attacker->GetActorRotation().Yaw, OutCurrent, true);
+	for (int32 Y = -4; Y <= 4; ++Y)
+	{
+		Evaluate(Origin, CurrentFacing + FacingLimit * float(Y) / 4.f, OutCurrent, true);
+	}
+
+	FVector Approach = (Origin - Target).GetSafeNormal2D();
+	if (Approach.IsNearlyZero()) Approach = -Attacker->GetActorForwardVector().GetSafeNormal2D();
+	const float Distances[] = {
+		FMath::Clamp(CurrentDistance, MinimumDistance, MaximumDistance),
+		MinimumDistance,
+		FMath::Lerp(MinimumDistance, MaximumDistance, 0.25f),
+		FMath::Lerp(MinimumDistance, MaximumDistance, 0.5f),
+		FMath::Lerp(MinimumDistance, MaximumDistance, 0.75f),
+		MaximumDistance };
+	for (float Distance : Distances)
+	{
+		for (int32 A = -4; A <= 4; ++A)
+		{
+			const FVector Direction = Approach.RotateAngleAxis(float(A) * 15.f, FVector::UpVector);
+			const FVector Location = FVector(Target.X + Direction.X * Distance,
+				Target.Y + Direction.Y * Distance, Origin.Z);
+			const float FacingYaw = (Target - Location).GetSafeNormal2D().Rotation().Yaw;
+			for (int32 Y = -4; Y <= 4; ++Y)
+			{
+				Evaluate(Location, FacingYaw + FacingLimit * float(Y) / 4.f, OutNearby, false);
+			}
+		}
+	}
+}
+
 float UCombatTrajectoryLibrary::EvaluateScoredContact(
 	const FBladeTrajectory& Trajectory,
 	const FTransform& RootTransform,
