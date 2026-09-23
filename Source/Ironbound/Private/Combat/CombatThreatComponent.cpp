@@ -76,28 +76,32 @@ void UCombatThreatComponent::TickComponent(
 
 	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 
-	// Recognition bookkeeping per attacker (objective; no reaction timing).
-	for (const TWeakObjectPtr<AActor>& Attacker : Attackers)
+	// Recognition is keyed by attacker and committed plan. A follow-up swing
+	// from the same pawn must start a fresh observation interval.
+	for (int32 Index = 0; Index < Attackers.Num(); ++Index)
 	{
+		const TWeakObjectPtr<AActor>& Attacker = Attackers[Index];
 		if (!Attacker.IsValid())
 		{
 			continue;
 		}
 
+		const int32 PlanId = Strikes.IsValidIndex(Index) ? Strikes[Index].PlanId : 0;
 		FThreatObservation& Observation = Observations.FindOrAdd(Attacker);
-
-		if (Observation.ObservationWorldTime <= 0.f)
+		if (!Observation.bInitialized || Observation.AttackerPlanId != PlanId)
 		{
+			Observation = FThreatObservation();
+			Observation.bInitialized = true;
+			Observation.AttackerPlanId = PlanId;
 			Observation.ObservationWorldTime = Now;
-			Observation.bRecognized = false;
-			Observation.bLoggedDiagnostics = false;
 
 			UE_LOG(
 				LogIronboundCombat,
 				Log,
-				TEXT("Threat observed [%s] attacker %s"),
+				TEXT("[THREAT] ATTACK_OBSERVED defender=%s attacker=%s plan=%d technique=%s"),
 				*GetNameSafe(GetOwner()),
-				*GetNameSafe(Attacker.Get()));
+				*GetNameSafe(Attacker.Get()), PlanId,
+				Strikes.IsValidIndex(Index) ? *Strikes[Index].TechniqueId.ToString() : TEXT("None"));
 		}
 
 		if (!Observation.bRecognized)
@@ -110,8 +114,9 @@ void UCombatThreatComponent::TickComponent(
 
 			Observation.bRecognized = true;
 			UE_LOG(LogIronboundCombat, Log,
-				TEXT("Threat recognized [%s] attacker %s"),
-				*GetNameSafe(GetOwner()), *GetNameSafe(Attacker.Get()));
+				TEXT("[THREAT] ATTACK_RECOGNIZED defender=%s attacker=%s plan=%d perceptionDelay=%.3fs"),
+				*GetNameSafe(GetOwner()), *GetNameSafe(Attacker.Get()),
+				PlanId, PerceptionDelaySeconds);
 		}
 	}
 }
@@ -180,6 +185,7 @@ TArray<FCombatThreat> UCombatThreatComponent::GetIncomingThreats() const
 
 		const FThreatObservation* Observation = Observations.Find(Attacker);
 		if (!Observation ||
+			Observation->AttackerPlanId != Strikes[Index].PlanId ||
 			!Observation->bRecognized ||
 			Now - Observation->ObservationWorldTime + KINDA_SMALL_NUMBER < PerceptionDelaySeconds)
 		{
@@ -187,9 +193,21 @@ TArray<FCombatThreat> UCombatThreatComponent::GetIncomingThreats() const
 		}
 
 		FCombatThreat Threat;
-		if (BuildThreatFromCommittedStrike(Attacker, Strikes[Index], Threat))
+		FString FailureReason;
+		if (Mutable->BuildThreatFromCommittedStrike(
+			Attacker, Strikes[Index], Threat, &FailureReason))
 		{
 			Threats.Add(Threat);
+		}
+		else if (FThreatObservation* MutableObservation = Mutable->Observations.Find(Attacker);
+			MutableObservation && !MutableObservation->bLoggedNoPrediction)
+		{
+			MutableObservation->bLoggedNoPrediction = true;
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[THREAT] PREDICTION_REJECTED defender=%s attacker=%s plan=%d technique=%s reason=%s"),
+				*GetNameSafe(GetOwner()), *GetNameSafe(Attacker),
+				Strikes[Index].PlanId, *Strikes[Index].TechniqueId.ToString(),
+				*FailureReason);
 		}
 	}
 
@@ -211,7 +229,7 @@ bool UCombatThreatComponent::GetPrimaryIncomingThreat(FCombatThreat& OutThreat) 
 	for (const FCombatThreat& Threat : Threats)
 	{
 		const float Time = Threat.TimeToImpact > 0.f ? Threat.TimeToImpact : TNumericLimits<float>::Max();
-		if (Time < BestTime)
+		if (!bFound || Time < BestTime)
 		{
 			BestTime = Time;
 			OutThreat = Threat;
@@ -293,18 +311,25 @@ bool UCombatThreatComponent::GetAttackerSourcePlaybackTime(
 bool UCombatThreatComponent::BuildThreatFromCommittedStrike(
 	AActor* Attacker,
 	const FCombatCommittedStrike& Strike,
-	FCombatThreat& OutThreat) const
+	FCombatThreat& OutThreat,
+	FString* OutFailureReason) const
 {
 	OutThreat = FCombatThreat();
+	if (OutFailureReason)
+	{
+		OutFailureReason->Reset();
+	}
 
 	if (!Attacker || !Strike.bValid)
 	{
+		if (OutFailureReason) *OutFailureReason = TEXT("invalid attacker or committed strike");
 		return false;
 	}
 
 	float CurrentSourceTime = 0.f;
 	if (!GetAttackerSourcePlaybackTime(Attacker, CurrentSourceTime))
 	{
+		if (OutFailureReason) *OutFailureReason = TEXT("attacker montage source time unavailable");
 		return false;
 	}
 
@@ -338,6 +363,10 @@ bool UCombatThreatComponent::BuildThreatFromCommittedStrike(
 
 	if (BodyIntersectionTime >= TNumericLimits<float>::Max())
 	{
+		if (OutFailureReason)
+		{
+			*OutFailureReason = TEXT("committed blade path misses all configured anatomical threat probes");
+		}
 		return false;
 	}
 
@@ -349,6 +378,7 @@ bool UCombatThreatComponent::BuildThreatFromCommittedStrike(
 	USkeletalMeshComponent* DefenderMesh = GetFighterMesh();
 	if (!DefenderMesh)
 	{
+		if (OutFailureReason) *OutFailureReason = TEXT("defender skeletal mesh unavailable");
 		return false;
 	}
 
@@ -398,6 +428,10 @@ bool UCombatThreatComponent::BuildThreatFromCommittedStrike(
 
 	if (!bFoundContact)
 	{
+		if (OutFailureReason)
+		{
+			*OutFailureReason = TEXT("body intersection sample has no valid anatomical probe");
+		}
 		return false;
 	}
 

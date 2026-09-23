@@ -4,6 +4,7 @@
 #include "Combat/CombatBodyProbes.h"
 #include "Combat/CombatEquipmentComponent.h"
 #include "Combat/CombatExecutionComponent.h"
+#include "Combat/CombatExecutionTypes.h"
 #include "Combat/WeaponDefinition.h"
 #include "Combat/CombatTechniqueExecutionConfigs.h"
 #include "Animation/Skeleton.h"
@@ -598,12 +599,20 @@ bool UCombatExecutor_ProceduralParry::FindBestParryCandidate(FParryCandidate& Ou
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	USkeletalMeshComponent* Mesh = GetFighterMesh();
 	if (!Mesh || !LocalConfig)
+	{
+		LastParryEarlyExitReason = !Mesh
+			? TEXT("defender skeletal mesh unavailable")
+			: TEXT("procedural parry config unavailable");
 		return false;
+	}
 
 	const FCombatThreat& Threat = Request.ThreatContext.Threat;
 	AActor* Attacker = Threat.Attacker;
 	if (!Attacker)
+	{
+		LastParryEarlyExitReason = TEXT("threat attacker invalid");
 		return false;
+	}
 
 	const UCombatEquipmentComponent* Equipment = GetFighter()->FindComponentByClass<UCombatEquipmentComponent>();
 	const UStaticMeshComponent* Weapon = Equipment ? Equipment->GetWeapon() : nullptr;
@@ -629,7 +638,10 @@ bool UCombatExecutor_ProceduralParry::FindBestParryCandidate(FParryCandidate& Ou
 	const FTransform& AttackerTransform = Threat.AttackerTransform;
 	float CurrentSourceTime = Threat.CurrentSourceTime;
 	if (!GetAttackerSourcePlaybackTime(CurrentSourceTime))
+	{
+		LastParryEarlyExitReason = TEXT("attacker montage source time unavailable");
 		return false;
+	}
 	bool bBodyAlreadyIntersected = false;
 	const float BodyIntersectionTime = CombatBodyProbes::FindBodyIntersectionTime(
 			Mesh,
@@ -664,8 +676,8 @@ bool UCombatExecutor_ProceduralParry::FindBestParryCandidate(FParryCandidate& Ou
 			++LastDiagnostics.ExpiredSegments;
 			continue;
 		}
-		// Never accept a parry after the incoming blade has already
-		// entered the defender's torso/head envelope.
+		// Never accept a parry after the incoming blade has already entered
+		// the defender's configured head, torso, arm, or hand envelope.
 		if (Segment.TimeSeconds >=
 			BodyIntersectionTime - LocalConfig->BodySafetyMarginSeconds)
 		{
@@ -823,6 +835,14 @@ void UCombatExecutor_ProceduralParry::LogDiagnosticsOnce() const
 bool UCombatExecutor_ProceduralParry::OnInitialize(
 	const FCombatTechniqueRequest& InRequest)
 {
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[PARRY] REQUEST_RECEIVED defender=%s technique=%s attacker=%s attackerPlan=%d hasContext=%d predictedContact=%d tti=%.3fs"),
+		*GetNameSafe(GetFighter()), *InRequest.TechniqueId.ToString(),
+		*GetNameSafe(InRequest.ThreatContext.Threat.Attacker),
+		InRequest.ThreatContext.Threat.AttackerPlanId,
+		InRequest.ThreatContext.bHasThreat ? 1 : 0,
+		InRequest.ThreatContext.Threat.bHasPredictedContact ? 1 : 0,
+		InRequest.ThreatContext.Threat.TimeToImpact);
 	const UExecConfig_ProceduralParry* LocalConfig = ParryConfig();
 	if (!LocalConfig)
 	{
@@ -863,6 +883,10 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 	AActor* Attacker = InRequest.ThreatContext.Threat.Attacker;
 	if (!IsValid(Attacker))
 	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("[PARRY] REQUEST_REJECTED stage=ThreatValidation reason=attacker invalid technique=%s plan=%d"),
+			*InRequest.TechniqueId.ToString(),
+			InRequest.ThreatContext.Threat.AttackerPlanId);
 		return false;
 	}
 
@@ -872,9 +896,10 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 		UE_LOG(
 			LogIronboundCombat,
 			Warning,
-			TEXT("ProceduralParry [%s | %s]: no ready equipment"),
+			TEXT("[PARRY] REQUEST_REJECTED stage=Equipment reason=no ready equipment defender=%s technique=%s plan=%d"),
 			*GetNameSafe(GetFighter()),
-			*InRequest.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString(),
+			InRequest.ThreatContext.Threat.AttackerPlanId);
 
 		return false;
 	}
@@ -884,9 +909,10 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 		UE_LOG(
 			LogIronboundCombat,
 			Warning,
-			TEXT("ProceduralParry [%s | %s]: parry anatomy unavailable"),
+			TEXT("[PARRY] REQUEST_REJECTED stage=Anatomy reason=required parry arm bones unavailable defender=%s technique=%s plan=%d"),
 			*GetNameSafe(GetFighter()),
-			*InRequest.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString(),
+			InRequest.ThreatContext.Threat.AttackerPlanId);
 
 		return false;
 	}
@@ -906,9 +932,11 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 		UE_LOG(
 			LogIronboundCombat,
 			Log,
-			TEXT("ProceduralParry [%s | %s]: no parry candidate"),
+			TEXT("[PARRY] REQUEST_REJECTED stage=CandidateGeneration reason=%s defender=%s technique=%s attacker=%s plan=%d"),
+			LastParryEarlyExitReason.IsEmpty() ? TEXT("no feasible candidate survived constraints") : *LastParryEarlyExitReason,
 			*GetNameSafe(GetFighter()),
-			*InRequest.TechniqueId.ToString());
+			*InRequest.TechniqueId.ToString(), *GetNameSafe(Attacker),
+			InRequest.ThreatContext.Threat.AttackerPlanId);
 
 		return false;
 	}
@@ -920,6 +948,11 @@ bool UCombatExecutor_ProceduralParry::OnInitialize(
 		Body->BeginParryBrace();
 		bBraceActive = true;
 	}
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[PARRY] BODY_BRACE_ACTIVE defender=%s attacker=%s plan=%d handTarget=%s"),
+		*GetNameSafe(GetFighter()), *GetNameSafe(Attacker),
+		InRequest.ThreatContext.Threat.AttackerPlanId,
+		*ActiveParryCandidate.RequiredHandTransform.GetLocation().ToCompactString());
 
 	UE_LOG(LogTemp, Warning,
 		TEXT("Parry [%s]: LOCKED quality=%.2f t=%.3f hand=%.0fcm/s blade=%.0fdeg/s cross=%.0f enemyBlade=%.0f%%"),
@@ -951,6 +984,26 @@ void UCombatExecutor_ProceduralParry::OnTick(float DeltaTime)
 	}
 
 	const float Now = World->GetTimeSeconds();
+	if (Phase == EParryExecutionPhase::Intercept)
+	{
+		const FCombatThreat& PlannedThreat = Request.ThreatContext.Threat;
+		UCombatExecutionComponent* AttackerExecution = PlannedThreat.Attacker
+			? PlannedThreat.Attacker->FindComponentByClass<UCombatExecutionComponent>()
+			: nullptr;
+		const FCombatCommittedStrike LiveStrike = AttackerExecution
+			? AttackerExecution->GetCommittedStrike()
+			: FCombatCommittedStrike();
+		if (!LiveStrike.bValid || LiveStrike.PlanId != PlannedThreat.AttackerPlanId ||
+			LiveStrike.TechniqueId != PlannedThreat.TechniqueId)
+		{
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[PARRY] EXECUTION_ABORTED reason=incoming attack ended cancelled or changed defender=%s attacker=%s plannedPlan=%d livePlan=%d"),
+				*GetNameSafe(Fighter), *GetNameSafe(PlannedThreat.Attacker),
+				PlannedThreat.AttackerPlanId, LiveStrike.bValid ? LiveStrike.PlanId : 0);
+			FinishExecution(TEXT("incoming attack ended, was cancelled, or changed"));
+			return;
+		}
+	}
 
 	UpdateExecutionPose(DeltaTime);
 

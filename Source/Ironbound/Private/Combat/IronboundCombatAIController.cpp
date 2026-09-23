@@ -8,10 +8,12 @@
 #include "Combat/CombatFocusComponent.h"
 #include "Combat/CombatTechniqueComponent.h"
 #include "Combat/CombatTechniqueRow.h"
+#include "Combat/CombatTarget.h"
 #include "Combat/CombatThreatComponent.h"
 #include "Combat/CombatThreatTypes.h"
 #include "Combat/FighterComponent.h"
 #include "Combat/FighterVitalsComponent.h"
+#include "Combat/WeaponDefinition.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
@@ -86,6 +88,9 @@ void AIronboundCombatAIController::OnPossess(APawn* InPawn)
 	LastAnsweredThreatAttacker.Reset();
 	PendingThreatTechnique = NAME_None;
 	LastAnsweredThreatTechnique = NAME_None;
+	PendingThreatPlanId = 0;
+	LastAnsweredThreatPlanId = 0;
+	RecentAttackRegions.Reset();
 	bHasMoveGoal = false;
 	bMoveRequestActive = false;
 	NextStandingPlanWorldTime = 0.f;
@@ -134,6 +139,9 @@ void AIronboundCombatAIController::OnUnPossess()
 	LastAnsweredThreatAttacker.Reset();
 	PendingThreatTechnique = NAME_None;
 	LastAnsweredThreatTechnique = NAME_None;
+	PendingThreatPlanId = 0;
+	LastAnsweredThreatPlanId = 0;
+	RecentAttackRegions.Reset();
 	LastIntent.Reset();
 
 	Super::OnUnPossess();
@@ -512,35 +520,112 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 	// ordinary cut may contact anywhere along the useful blade, while a thrust
 	// can explicitly request the tip.
 	const float PlanningAimPoint = Config->AimPointAlongBlade;
-	FCombatAttackOpportunity Current, Nearby;
+	TArray<FCombatAttackOpportunity> Opportunities;
 	UCombatTrajectoryLibrary::FindAttackOpportunities(AttackerMesh, TargetMesh, Trajectory,
 		Config->CombatTargets, TechniqueId, RequiredRegion, PlanningAimPoint,
 		Config->AimWindowStartFraction, Config->AimWindowEndFraction,
 		Config->MaxFacingDeviationFromTargetDegrees, Config->ContactToleranceCm,
-		MaxNearbyMoveCm, Current, Nearby);
-	UE_LOG(LogIronboundCombat, Log,
-		TEXT("[AI] OPPORTUNITIES PlanId=%d aimBlade=%.2f Current feasible=%d region=%s bone=%s quality=%.1f bladeMiss=%.1fcm range=%.1fcm; Nearby feasible=%d region=%s bone=%s quality=%.1f bladeMiss=%.1fcm range=%.1fcm move=%.1fcm stance=%s"),
-		DecisionId, PlanningAimPoint, Current.bFeasible ? 1 : 0, *Current.Region.ToString(), *Current.Bone.ToString(),
-		Current.Quality, Current.MissCm, Current.StandoffCm, Nearby.bFeasible ? 1 : 0,
-		*Nearby.Region.ToString(), *Nearby.Bone.ToString(), Nearby.Quality, Nearby.MissCm, Nearby.StandoffCm,
-		Nearby.MovementCostCm, *Nearby.Stance.GetLocation().ToCompactString());
-	const float Improvement = Nearby.Quality - Nearby.MovementCostCm * 0.03f - Current.Quality;
-	const float RangeGain = Nearby.StandoffCm - Current.StandoffCm;
-	const bool bRangeImprovement = Current.bFeasible && Nearby.bFeasible &&
-		RangeGain >= MinimumRangeGainForRepositionCm;
-	const bool bNearbyUseful = Nearby.bFeasible &&
-		(!Current.bFeasible || bRangeImprovement || Improvement >= MeaningfulQualityGain);
-	const float Roll = Current.bFeasible && bNearbyUseful && !bRangeImprovement
-		? FMath::FRand() : -1.f;
-	const bool bReposition = bNearbyUseful &&
-		(!Current.bFeasible || bRangeImprovement || Roll < RepositionPreference);
-	UE_LOG(LogIronboundCombat, Log,
-		TEXT("[AI] POLICY PlanId=%d RepositionPreference=%.2f Roll=%.3f RangeGain=%.1fcm ImprovementAfterMove=%.1f"),
-		DecisionId, RepositionPreference, Roll, RangeGain, Improvement);
-	if (!Current.bFeasible && !Nearby.bFeasible)
+		MaxNearbyMoveCm, Opportunities);
+
+	TArray<FCombatAttackOpportunity> FeasibleOpportunities;
+	FCombatAttackOpportunity ClosestRejected;
+	for (const FCombatAttackOpportunity& Opportunity : Opportunities)
+	{
+		if (Opportunity.bFeasible)
+		{
+			FeasibleOpportunities.Add(Opportunity);
+		}
+		else if (Opportunity.ContactSample != INDEX_NONE &&
+			Opportunity.MissCm < ClosestRejected.MissCm)
+		{
+			ClosestRejected = Opportunity;
+		}
+	}
+
+	const float WeaponProficiency = Fighter && Equipment && Equipment->Definition
+		? Fighter->GetEffectiveWeaponProficiency(Equipment->Definition)
+		: 0.25f;
+	float LearnedSkillProficiency = 0.5f;
+	if (Row && !Row->RequiredSkills.IsEmpty())
+	{
+		LearnedSkillProficiency = 0.f;
+		for (const FName SkillId : Row->RequiredSkills)
+		{
+			LearnedSkillProficiency += Techniques->GetSkillProficiency(SkillId, 0.25f);
+		}
+		LearnedSkillProficiency /= static_cast<float>(Row->RequiredSkills.Num());
+	}
+	const float DecisionSkill = FMath::Clamp(
+		0.55f * WeaponProficiency + 0.45f * LearnedSkillProficiency, 0.f, 1.f);
+
+	struct FScoredOpportunity
+	{
+		FCombatAttackOpportunity Opportunity;
+		float Score = -TNumericLimits<float>::Max();
+		float ExpectedDamage = 0.f;
+	};
+	TArray<FScoredOpportunity> ScoredOpportunities;
+	const float MaximumMovement = FMath::Max(MaxNearbyMoveCm, 1.f);
+	for (const FCombatAttackOpportunity& Opportunity : FeasibleOpportunities)
+	{
+		const FCombatTargetRow* TargetRow = Config->CombatTargets
+			? Config->CombatTargets->FindRow<FCombatTargetRow>(
+				Opportunity.Region, TEXT("AI attack target selection"), false)
+			: nullptr;
+		if (!TargetRow)
+		{
+			continue;
+		}
+
+		const float ExpectedDamage = FMath::Max(0.f,
+			Row->DamageProfile.CompatibilityDamage *
+			CombatTargetRules::GetDamageMultiplier(Opportunity.Region, *TargetRow));
+		const float Desirability = FMath::Clamp(TargetRow->Score / 100.f, 0.f, 1.f);
+		const float DamageValue = FMath::Clamp(ExpectedDamage / 20.f, 0.f, 1.f);
+		const float ContactQuality = FMath::Clamp(
+			(UCombatTrajectoryLibrary::MaxOpportunityContactMissCm - Opportunity.MissCm) /
+			(UCombatTrajectoryLibrary::MaxOpportunityContactMissCm +
+			CombatTargetRules::GetContactRadiusCm(Opportunity.Region, *TargetRow)),
+			0.f, 1.f);
+		const float RangeQuality = FMath::Clamp(
+			Opportunity.StandoffCm / FMath::Max(Trajectory.ReachMax + 60.f, 1.f), 0.f, 1.f);
+		const float MovementPenalty = 0.08f * FMath::Clamp(
+			Opportunity.MovementCostCm / MaximumMovement, 0.f, 1.f);
+		const float TacticalScore =
+			0.25f * Desirability +
+			0.30f * DamageValue +
+			0.20f * ContactQuality +
+			0.25f * RangeQuality -
+			MovementPenalty;
+
+		// Keep an already viable in-place strike unless repositioning materially
+		// improves its contact or tactical value. This hysteresis stops small
+		// pose changes from pulling the controller into repeated lateral footwork.
+		if (Opportunity.MovementCostCm > 1.f)
+		{
+			const FScoredOpportunity* CurrentSameRegion = ScoredOpportunities.FindByPredicate(
+				[&Opportunity](const FScoredOpportunity& Candidate)
+				{
+					return Candidate.Opportunity.Region == Opportunity.Region &&
+						Candidate.Opportunity.MovementCostCm <= 1.f;
+				});
+			if (CurrentSameRegion &&
+				TacticalScore < CurrentSameRegion->Score + MeaningfulQualityGain)
+			{
+				continue;
+			}
+		}
+
+		FScoredOpportunity& Scored = ScoredOpportunities.AddDefaulted_GetRef();
+		Scored.Opportunity = Opportunity;
+		Scored.Score = TacticalScore;
+		Scored.ExpectedDamage = ExpectedDamage;
+	}
+
+	if (ScoredOpportunities.IsEmpty())
 	{
 		RejectedTrajectory = Trajectory;
-		RejectedOpportunity = Nearby.ContactSample != INDEX_NONE ? Nearby : Current;
+		RejectedOpportunity = ClosestRejected;
 		RejectedContactToleranceCm = Config->ContactToleranceCm;
 		bHasRejectedOpportunity = RejectedOpportunity.ContactSample != INDEX_NONE;
 		const float Distance = FVector::Dist2D(GetPawn()->GetActorLocation(), Target->GetActorLocation());
@@ -561,17 +646,93 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 		RecordPlanningFailure();
 		return;
 	}
+
+	// Cycle through feasible anatomy: an otherwise reachable region is not
+	// discarded because its authored score is lower, and the fallback permits
+	// repetition when the recent set contains every feasible region.
+	float BestScore = -TNumericLimits<float>::Max();
+	for (const FScoredOpportunity& Candidate : ScoredOpportunities)
+	{
+		BestScore = FMath::Max(BestScore, Candidate.Score);
+	}
+	TArray<int32> SelectionPool;
+	TArray<int32> DiversePool;
+	for (int32 Index = 0; Index < ScoredOpportunities.Num(); ++Index)
+	{
+		const FScoredOpportunity& Candidate = ScoredOpportunities[Index];
+		SelectionPool.Add(Index);
+		if (!RecentAttackRegions.Contains(Candidate.Opportunity.Region))
+		{
+			DiversePool.Add(Index);
+		}
+	}
+	if (!DiversePool.IsEmpty())
+	{
+		SelectionPool = MoveTemp(DiversePool);
+	}
+	else
+	{
+		// All currently feasible regions were used recently. Start a new cycle
+		// so a two-region duel alternates instead of repeating its top target.
+		RecentAttackRegions.Reset();
+		SelectionPool.Reset();
+		for (int32 Index = 0; Index < ScoredOpportunities.Num(); ++Index)
+		{
+			SelectionPool.Add(Index);
+		}
+	}
+
+	const float Temperature = FMath::Lerp(
+		FMath::Clamp(RepositionPreference, 0.02f, 1.f), 0.025f, DecisionSkill);
+	float TotalWeight = 0.f;
+	TArray<float> Weights;
+	for (const int32 Index : SelectionPool)
+	{
+		const float Weight = FMath::Exp(FMath::Clamp(
+			(ScoredOpportunities[Index].Score - BestScore) / Temperature, -12.f, 0.f));
+		Weights.Add(Weight);
+		TotalWeight += Weight;
+	}
+	uint32 Seed = HashCombine(GetTypeHash(GetPawn()), GetTypeHash(DecisionId));
+	FRandomStream Random( static_cast<int32>(Seed) );
+	float Pick = Random.FRand() * TotalWeight;
+	int32 SelectedIndex = SelectionPool.Last();
+	for (int32 PoolIndex = 0; PoolIndex < SelectionPool.Num(); ++PoolIndex)
+	{
+		Pick -= Weights[PoolIndex];
+		if (Pick <= 0.f)
+		{
+			SelectedIndex = SelectionPool[PoolIndex];
+			break;
+		}
+	}
+
+	const FScoredOpportunity& Chosen = ScoredOpportunities[SelectedIndex];
+	ActiveOpportunity = Chosen.Opportunity;
+	const bool bReposition = ActiveOpportunity.MovementCostCm > 1.f;
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[AI] OPPORTUNITY_SET PlanId=%d count=%d selectedRegion=%s bone=%s score=%.3f expectedDamage=%.2f missToSurface=%.1fcm standoff=%.1fcm movement=%.1fcm skill=%.2f temperature=%.3f"),
+		DecisionId, ScoredOpportunities.Num(), *ActiveOpportunity.Region.ToString(),
+		*ActiveOpportunity.Bone.ToString(), Chosen.Score, Chosen.ExpectedDamage,
+		ActiveOpportunity.MissCm, ActiveOpportunity.StandoffCm,
+		ActiveOpportunity.MovementCostCm, DecisionSkill, Temperature);
+	for (const FScoredOpportunity& Candidate : ScoredOpportunities)
+	{
+		UE_LOG(LogIronboundCombat, VeryVerbose,
+			TEXT("[AI] OPPORTUNITY PlanId=%d region=%s bone=%s score=%.3f damage=%.2f miss=%.1fcm move=%.1fcm range=%.1fcm"),
+			DecisionId, *Candidate.Opportunity.Region.ToString(),
+			*Candidate.Opportunity.Bone.ToString(), Candidate.Score,
+			Candidate.ExpectedDamage, Candidate.Opportunity.MissCm,
+			Candidate.Opportunity.MovementCostCm, Candidate.Opportunity.StandoffCm);
+	}
 	bHasRejectedOpportunity = false;
 	bClosingForOpportunity = false;
-	ActiveOpportunity = bReposition ? Nearby : Current;
 	ActivePlanId = DecisionId;
 	PlannedTarget = Target;
 	UE_LOG(LogIronboundCombat, Log,
-		TEXT("[AI] CHOICE PlanId=%d Intent=%s Reason=%s region=%s bone=%s quality=%.1f range=%.1fcm tipMiss=%.1fcm move=%.1fcm destination=%s yaw=%.1f"),
+		TEXT("[AI] CHOICE PlanId=%d Intent=%s Reason=%s region=%s bone=%s quality=%.1f range=%.1fcm surfaceMiss=%.1fcm move=%.1fcm destination=%s yaw=%.1f"),
 		ActivePlanId, bReposition ? TEXT("RepositionForAttack") : TEXT("AttackFromCurrentPosition"),
-		bReposition ? (!Current.bFeasible ? TEXT("CurrentCannotContactNearbyCan")
-			: bRangeImprovement ? TEXT("FartherBladeContact") : TEXT("UsefulImprovementWonPolicyRoll"))
-			: (bNearbyUseful ? TEXT("CurrentAttackWonPolicyRoll") : TEXT("CurrentAttackGoodRepositionNotWorthCost")),
+		bReposition ? TEXT("FeasibleOpportunityImprovesPolicyScoreBeyondHysteresis") : TEXT("BestFeasibleOpportunityAtCurrentPosition"),
 		*ActiveOpportunity.Region.ToString(), *ActiveOpportunity.Bone.ToString(),
 		ActiveOpportunity.Quality, ActiveOpportunity.StandoffCm, ActiveOpportunity.MissCm,
 		ActiveOpportunity.MovementCostCm,
@@ -579,13 +740,18 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 	FCombatTechniqueRequest Request;
 	Request.TechniqueId = TechniqueId;
 	Request.Target = Target;
-	Request.TargetRegion = RequiredRegion;
+	Request.TargetRegion = ActiveOpportunity.Region;
 	Request.PlannedOpportunity = ActiveOpportunity;
 	Request.PlanId = ActivePlanId;
 	if (!Execution->RequestTechnique(Request))
 	{
 		ClearAttackPlan(TEXT("ExecutionRefusedSelectedOpportunity"), false);
 		return;
+	}
+	RecentAttackRegions.Add(ActiveOpportunity.Region);
+	while (RecentAttackRegions.Num() > 2)
+	{
+		RecentAttackRegions.RemoveAt(0);
 	}
 	bHadActiveDeliberate = true;
 	SetMovementMode(bReposition ? EIronboundAIMovementMode::GuardManeuver :
@@ -636,6 +802,10 @@ void AIronboundCombatAIController::DecisionStep()
 		LastAnsweredThreatAttacker.Reset();
 		PendingThreatTechnique = NAME_None;
 		LastAnsweredThreatTechnique = NAME_None;
+		PendingThreatPlanId = 0;
+		LastAnsweredThreatPlanId = 0;
+		PendingThreatStartWorldTime = 0.f;
+		RecentAttackRegions.Reset();
 		Focus->SetCombatTarget(nullptr);
 		StopMovement();
 		PublishIntent(TEXT("Searching"));
@@ -665,27 +835,82 @@ void AIronboundCombatAIController::DecisionStep()
 	// never interrupts an already committed pawn execution.
 	UCombatThreatComponent* Threats = Execution->GetThreats();
 	FCombatThreat Threat;
-	if (Threats && Threats->GetPrimaryIncomingThreat(Threat) &&
-		Threat.bHasPredictedContact && IsValid(Threat.Attacker))
+	if (Threats && Threats->GetPrimaryIncomingThreat(Threat))
 	{
-		const bool bSameThreat = PendingThreatAttacker.Get() == Threat.Attacker &&
-			PendingThreatTechnique == Threat.TechniqueId;
-		if (!bSameThreat)
+		if (!Threat.bHasPredictedContact || !IsValid(Threat.Attacker))
 		{
+			if (PendingThreatAttacker.Get() != Threat.Attacker ||
+				PendingThreatPlanId != Threat.AttackerPlanId)
+			{
+				UE_LOG(LogIronboundCombat, Log,
+					TEXT("[AI][PARRY] REFUSED stage=PredictedContact reason=%s attacker=%s plan=%d firstIntersection=%.3fs currentSource=%.3fs"),
+					Threat.bHasPredictedContact ? TEXT("attacker invalid") : TEXT("blade already intersected defender envelope"),
+					*GetNameSafe(Threat.Attacker), Threat.AttackerPlanId,
+					Threat.FirstBodyIntersectionTime, Threat.CurrentSourceTime);
+			}
 			PendingThreatAttacker = Threat.Attacker;
 			PendingThreatTechnique = Threat.TechniqueId;
+			PendingThreatPlanId = Threat.AttackerPlanId;
 			PendingThreatStartWorldTime = Now;
 		}
+		else
+		{
+			const bool bSameThreat = PendingThreatAttacker.Get() == Threat.Attacker &&
+				PendingThreatTechnique == Threat.TechniqueId &&
+				PendingThreatPlanId == Threat.AttackerPlanId;
+			if (!bSameThreat)
+			{
+				PendingThreatAttacker = Threat.Attacker;
+				PendingThreatTechnique = Threat.TechniqueId;
+				PendingThreatPlanId = Threat.AttackerPlanId;
+				PendingThreatStartWorldTime = Now;
+				UE_LOG(LogIronboundCombat, Log,
+					TEXT("[AI][PARRY] REACTION_STARTED attacker=%s plan=%d technique=%s tti=%.3fs"),
+					*GetNameSafe(Threat.Attacker), Threat.AttackerPlanId,
+					*Threat.TechniqueId.ToString(), Threat.TimeToImpact);
+			}
 
 		const FName ParryTechnique = FindAvailableTechnique(
 			ECombatTechniqueKind::Reactive,
 			PreferredReactiveTechnique);
 		const bool bAlreadyAnswered = LastAnsweredThreatAttacker.Get() == Threat.Attacker &&
-			LastAnsweredThreatTechnique == Threat.TechniqueId;
-		if (!bAlreadyAnswered && !ParryTechnique.IsNone() &&
-			Now - PendingThreatStartWorldTime >= GetEffectiveReactionDelay() &&
-			!Execution->IsExecutingReactive() &&
-			Execution->HasAdmissionSlot(ECombatExecutionKind::Reactive))
+			LastAnsweredThreatTechnique == Threat.TechniqueId &&
+			LastAnsweredThreatPlanId == Threat.AttackerPlanId;
+		if (ParryTechnique.IsNone())
+		{
+			FString Cause = TEXT("no reactive technique in battle repertoire");
+			const TArray<FName> Repertoire = Fighter->GetBattleRepertoire();
+			for (const FName CandidateId : Repertoire)
+			{
+				const FCombatTechniqueRow* CandidateRow = Techniques->FindRow(CandidateId);
+				if (!CandidateRow || CandidateRow->Kind != ECombatTechniqueKind::Reactive)
+				{
+					continue;
+				}
+				Cause = Techniques->GetAvailabilityFailureReason(CandidateId);
+				break;
+			}
+			if (!bSameThreat)
+			{
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[AI][PARRY] REFUSED stage=TechniqueAvailability reason=%s repertoireCount=%d attacker=%s plan=%d"),
+					*Cause, Repertoire.Num(), *GetNameSafe(Threat.Attacker), Threat.AttackerPlanId);
+			}
+			PublishIntent(TEXT("Threat observed; no reactive technique"), Target);
+		}
+		else if (bAlreadyAnswered)
+		{
+			UE_LOG(LogIronboundCombat, VeryVerbose,
+				TEXT("[AI][PARRY] SKIP reason=PlanAlreadyAnswered attacker=%s plan=%d"),
+				*GetNameSafe(Threat.Attacker), Threat.AttackerPlanId);
+		}
+		else if (Execution->IsExecutingReactive())
+		{
+			UE_LOG(LogIronboundCombat, VeryVerbose,
+				TEXT("[AI][PARRY] WAIT reason=ReactiveExecutionAlreadyActive attacker=%s plan=%d"),
+				*GetNameSafe(Threat.Attacker), Threat.AttackerPlanId);
+		}
+		else
 		{
 			FCombatTechniqueRequest Request;
 			Request.TechniqueId = ParryTechnique;
@@ -693,21 +918,50 @@ void AIronboundCombatAIController::DecisionStep()
 			Request.ThreatContext.bHasThreat = true;
 			Request.ThreatContext.Threat = Threat;
 
-			if (Execution->CanExecuteTechnique(Request) && Execution->RequestTechnique(Request))
+			const float ConfiguredDelay = GetEffectiveReactionDelay();
+			const bool bUrgentThreat = Threat.TimeToImpact <= ConfiguredDelay + 0.12f;
+			const float RequiredDelay = bUrgentThreat ? 0.f : ConfiguredDelay;
+			const float Elapsed = Now - PendingThreatStartWorldTime;
+			if (Elapsed + KINDA_SMALL_NUMBER < RequiredDelay)
+			{
+				UE_LOG(LogIronboundCombat, VeryVerbose,
+					TEXT("[AI][PARRY] WAIT stage=ReactionTiming attacker=%s plan=%d elapsed=%.3fs required=%.3fs tti=%.3fs urgent=%d"),
+					*GetNameSafe(Threat.Attacker), Threat.AttackerPlanId,
+					Elapsed, RequiredDelay, Threat.TimeToImpact, bUrgentThreat ? 1 : 0);
+			}
+			else if (!Execution->HasAdmissionSlot(ECombatExecutionKind::Reactive))
+			{
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[AI][PARRY] REFUSED stage=ExecutionAdmission reason=no reactive admission slot attacker=%s plan=%d"),
+					*GetNameSafe(Threat.Attacker), Threat.AttackerPlanId);
+			}
+			else if (!Execution->CanExecuteTechnique(Request))
+			{
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[AI][PARRY] REFUSED stage=ExecutionAdmission reason=%s technique=%s attacker=%s plan=%d"),
+					*Execution->GetTechniqueRejectionReason(Request),
+					*ParryTechnique.ToString(), *GetNameSafe(Threat.Attacker),
+					Threat.AttackerPlanId);
+			}
+			else if (Execution->RequestTechnique(Request))
 			{
 				LastAnsweredThreatAttacker = Threat.Attacker;
 				LastAnsweredThreatTechnique = Threat.TechniqueId;
-				const FCombatTechniqueRow* Row = Techniques->FindRow(ParryTechnique);
-				PublishIntent(Row ? *FString::Printf(TEXT("Parry: %s"), *Row->DisplayName.ToString()) : TEXT("Parry"), Target);
+				LastAnsweredThreatPlanId = Threat.AttackerPlanId;
+				UE_LOG(LogIronboundCombat, Log,
+					TEXT("[AI][PARRY] REQUEST_ACCEPTED technique=%s attacker=%s plan=%d sourceTechnique=%s tti=%.3fs"),
+					*ParryTechnique.ToString(), *GetNameSafe(Threat.Attacker),
+					Threat.AttackerPlanId, *Threat.TechniqueId.ToString(), Threat.TimeToImpact);
+				const FCombatTechniqueRow* ParryRow = Techniques->FindRow(ParryTechnique);
+				PublishIntent(ParryRow ? *FString::Printf(TEXT("Parry: %s"), *ParryRow->DisplayName.ToString()) : TEXT("Parry"), Target);
 			}
 			else
 			{
-				PublishIntent(TEXT("Threat observed; parry unavailable"), Target);
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[AI][PARRY] REFUSED stage=ReactiveExecutorInitialization reason=executor rejected request technique=%s attacker=%s plan=%d"),
+					*ParryTechnique.ToString(), *GetNameSafe(Threat.Attacker), Threat.AttackerPlanId);
 			}
 		}
-		else if (!Execution->IsExecutingReactive())
-		{
-			PublishIntent(TEXT("Threat observed; reacting"), Target);
 		}
 	}
 	else
@@ -716,6 +970,8 @@ void AIronboundCombatAIController::DecisionStep()
 		LastAnsweredThreatAttacker.Reset();
 		PendingThreatTechnique = NAME_None;
 		LastAnsweredThreatTechnique = NAME_None;
+		PendingThreatPlanId = 0;
+		LastAnsweredThreatPlanId = 0;
 		PendingThreatStartWorldTime = 0.f;
 	}
 

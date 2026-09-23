@@ -48,6 +48,7 @@ public:
 	/** Stable availability: repertoire + learned skills + weapon family/equipment. */
 	UFUNCTION(BlueprintPure, Category="Combat|Techniques")
 	bool IsAvailable(FName TechniqueId) const;
+	FString GetAvailabilityFailureReason(FName TechniqueId) const;
 
 	/** All currently available technique ids. */
 	UFUNCTION(BlueprintPure, Category="Combat|Techniques")
@@ -60,6 +61,7 @@ public:
 	 */
 	UFUNCTION(BlueprintPure, Category="Combat|Techniques")
 	bool CanExecute(FName TechniqueId, const FCombatTechniqueRequest& Context) const;
+	FString GetExecutionFailureReason(FName TechniqueId, const FCombatTechniqueRequest& Context) const;
 
 	/** Proficiency the fighter has learned for a skill id; fallback when unlearned. */
 	UFUNCTION(BlueprintPure, Category="Combat|Techniques")

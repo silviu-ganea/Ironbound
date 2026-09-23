@@ -62,9 +62,13 @@ struct IRONBOUND_API FCombatInteraction
 	UPROPERTY(BlueprintReadWrite, Category="Combat|Interaction")
 	float WeaponMassKg = 0.f;
 
-	/** Hit body region bone when the receiver was a body mesh. */
+	/** Resolved row name from DT_CombatTargets for the actual contact region. */
 	UPROPERTY(BlueprintReadWrite, Category="Combat|Interaction")
 	FName BodyRegion;
+
+	/** Actual hit bone, or the closest configured target bone for capsule hits. */
+	UPROPERTY(BlueprintReadWrite, Category="Combat|Interaction")
+	FName BodyBone;
 };
 
 /**

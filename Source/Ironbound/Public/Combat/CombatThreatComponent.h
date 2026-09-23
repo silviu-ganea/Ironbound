@@ -72,8 +72,11 @@ private:
 	struct FThreatObservation
 	{
 		float ObservationWorldTime = 0.f;
+		int32 AttackerPlanId = 0;
+		bool bInitialized = false;
 		bool bRecognized = false;
 		bool bLoggedDiagnostics = false;
+		bool bLoggedNoPrediction = false;
 	};
 
 	/** Maps a world time into the attacker's source-animation time (montage -> sequence). */
@@ -85,7 +88,8 @@ private:
 	bool BuildThreatFromCommittedStrike(
 		AActor* Attacker,
 		const FCombatCommittedStrike& Strike,
-		FCombatThreat& OutThreat) const;
+		FCombatThreat& OutThreat,
+		FString* OutFailureReason = nullptr) const;
 
 	void DiscoverThreatSources(TArray<AActor*>& OutAttackers, TArray<FCombatCommittedStrike>& OutStrikes);
 

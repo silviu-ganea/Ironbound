@@ -56,7 +56,7 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Movement", meta=(ClampMin="0.0"))
 	float FailedPathRetryDelaySeconds = 0.75f;
 
-	/** Chance to choose a nearby improvement when both current and nearby attacks are useful. */
+	/** Baseline policy variation; higher fighter proficiency makes selection more consistent. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0", ClampMax="1.0"))
 	float RepositionPreference = 0.25f;
 
@@ -70,15 +70,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="10.0"))
 	float MaxNearbyMoveCm = 250.f;
 
+	/** Minimum normalized tactical-score gain required before replacing a viable in-place attack with footwork. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0"))
-	float MeaningfulQualityGain = 4.f;
+	float MeaningfulQualityGain = 0.04f;
 
 	/** A feasible attack this much farther from the target is chosen before the preference roll. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0"))
 	float MinimumRangeGainForRepositionCm = 5.f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="10.0"))
-	float TargetDisplacementToleranceCm = 10.f;
+	float TargetDisplacementToleranceCm = 25.f;
 
 	UFUNCTION(BlueprintPure, Category="Ironbound AI|Movement")
 	EIronboundAIMovementMode GetCombatMovementMode() const { return MovementMode; }
@@ -157,6 +158,9 @@ private:
 	TWeakObjectPtr<AActor> LastAnsweredThreatAttacker;
 	FName PendingThreatTechnique;
 	FName LastAnsweredThreatTechnique;
+	int32 PendingThreatPlanId = 0;
+	int32 LastAnsweredThreatPlanId = 0;
+	TArray<FName> RecentAttackRegions;
 	FVector LastMoveGoal = FVector::ZeroVector;
 	FString LastIntent;
 	float NextDecisionWorldTime = 0.f;

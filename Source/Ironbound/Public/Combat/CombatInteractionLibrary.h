@@ -6,6 +6,7 @@
 #include "CombatInteractionLibrary.generated.h"
 
 class UDataTable;
+class USkeletalMeshComponent;
 
 /**
  * Stateless interaction resolution seam.
@@ -36,4 +37,19 @@ public:
 	static FCombatInteractionResult Resolve(
 		const FCombatInteraction& Interaction,
 		const UDataTable* TechniquesTable);
+
+	/** Native hit path that also applies the actual anatomical target row. */
+	static FCombatInteractionResult ResolveWithTargets(
+		const FCombatInteraction& Interaction,
+		const UDataTable* TechniquesTable,
+		const UDataTable* CombatTargets);
+
+	/** Map a physics hit bone directly, or use nearest configured target bone for capsule hits. */
+	static FName ResolveBodyRegion(
+		const UDataTable* CombatTargets,
+		USkeletalMeshComponent* ReceiverMesh,
+		FName HitBone,
+		const FVector& ContactPoint,
+		FName& OutResolvedBone,
+		bool& bOutUsedFallback);
 };

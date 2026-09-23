@@ -98,28 +98,33 @@ void UCombatTechniqueComponent::RebuildCacheIfNeeded() const
 
 bool UCombatTechniqueComponent::IsAvailable(FName TechniqueId) const
 {
+	return GetAvailabilityFailureReason(TechniqueId).IsEmpty();
+}
+
+FString UCombatTechniqueComponent::GetAvailabilityFailureReason(FName TechniqueId) const
+{
 	const FCombatTechniqueRow* Row = FindRow(TechniqueId);
 	if (!Row)
 	{
-		return false;
+		return TEXT("technique row missing");
 	}
 
 	const UFighterVitalsComponent* Vitals = GetVitals();
 	if (!Vitals || Vitals->IsDead())
 	{
-		return false;
+		return !Vitals ? TEXT("fighter vitals unavailable") : TEXT("fighter is dead");
 	}
 
 	const UFighterComponent* Fighter = GetFighter();
 	if (!Fighter)
 	{
-		return false;
+		return TEXT("fighter component unavailable");
 	}
 
 	// Battle repertoire holds technique ids; the technique must be prepared for this battle.
 	if (!Fighter->IsBattleTechniqueSelected(TechniqueId))
 	{
-		return false;
+		return TEXT("technique is not in the battle repertoire");
 	}
 
 	// Every required skill must actually be learned.
@@ -127,7 +132,7 @@ bool UCombatTechniqueComponent::IsAvailable(FName TechniqueId) const
 	{
 		if (!Fighter->HasLearnedSkill(SkillId))
 		{
-			return false;
+			return FString::Printf(TEXT("required skill %s is not learned"), *SkillId.ToString());
 		}
 	}
 
@@ -143,14 +148,15 @@ bool UCombatTechniqueComponent::IsAvailable(FName TechniqueId) const
 			!Equipment->bReady ||
 			!Equipment->Definition)
 		{
-			return false;
+			return TEXT("required weapon is not equipped and ready");
 		}
 
 		const UWeaponDefinition* Weapon = Equipment->Definition;
 		if (Row->WeaponFamilyTag.IsValid() &&
 			(!Weapon->FamilyTag.IsValid() || !Weapon->FamilyTag.MatchesTag(Row->WeaponFamilyTag)))
 		{
-			return false;
+			return FString::Printf(TEXT("weapon family %s does not match required family %s"),
+				*Weapon->FamilyTag.ToString(), *Row->WeaponFamilyTag.ToString());
 		}
 
 		if (!Row->CompatibleWeaponFamilies.IsEmpty())
@@ -166,7 +172,7 @@ bool UCombatTechniqueComponent::IsAvailable(FName TechniqueId) const
 			}
 			if (!bFamilyMatch)
 			{
-				return false;
+				return TEXT("weapon family is not in the compatible family set");
 			}
 		}
 
@@ -192,18 +198,19 @@ bool UCombatTechniqueComponent::IsAvailable(FName TechniqueId) const
 			}
 			if (!bClassMatch)
 			{
-				return false;
+				return TEXT("weapon class is not in the compatible class set");
 			}
 		}
 
 		if (Row->MinimumWeaponProficiency > 0.f &&
 			Fighter->GetEffectiveWeaponProficiency(Weapon) < Row->MinimumWeaponProficiency)
 		{
-			return false;
+			return FString::Printf(TEXT("weapon proficiency %.2f is below minimum %.2f"),
+				Fighter->GetEffectiveWeaponProficiency(Weapon), Row->MinimumWeaponProficiency);
 		}
 	}
 
-	return true;
+	return FString();
 }
 
 TArray<FName> UCombatTechniqueComponent::GetAvailableTechniques() const
@@ -222,10 +229,17 @@ bool UCombatTechniqueComponent::CanExecute(
 	FName TechniqueId,
 	const FCombatTechniqueRequest& Context) const
 {
+	return GetExecutionFailureReason(TechniqueId, Context).IsEmpty();
+}
+
+FString UCombatTechniqueComponent::GetExecutionFailureReason(
+	FName TechniqueId,
+	const FCombatTechniqueRequest& Context) const
+{
 	const FCombatTechniqueRow* Row = FindRow(TechniqueId);
 	if (!Row)
 	{
-		return false;
+		return TEXT("technique row missing");
 	}
 
 	// Deliberate target engagement requires an explicit, valid request target.
@@ -234,13 +248,13 @@ bool UCombatTechniqueComponent::CanExecute(
 		const AActor* Target = Context.Target;
 		if (!IsValid(Target) || Target == GetOwner())
 		{
-			return false;
+			return !IsValid(Target) ? TEXT("required combat target is invalid") : TEXT("fighter cannot target itself");
 		}
 
 		const UFighterComponent* Fighter = GetFighter();
 		if (!Fighter || !Fighter->IsEnemy(Target))
 		{
-			return false;
+			return !Fighter ? TEXT("fighter component unavailable") : TEXT("target is not an enemy");
 		}
 	}
 
@@ -249,17 +263,17 @@ bool UCombatTechniqueComponent::CanExecute(
 	{
 		if (!Context.ThreatContext.bHasThreat)
 		{
-			return false;
+			return TEXT("reactive request has no threat context");
 		}
 
 		const AActor* Attacker = Context.ThreatContext.Threat.Attacker;
 		if (!IsValid(Attacker))
 		{
-			return false;
+			return TEXT("threat attacker is invalid");
 		}
 	}
 
-	return true;
+	return FString();
 }
 
 float UCombatTechniqueComponent::GetSkillProficiency(

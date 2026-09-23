@@ -65,6 +65,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Combat|Techniques")
 	bool CanExecuteTechnique(const FCombatTechniqueRequest& Request) const;
 
+	/** Human-readable authoritative preflight failure used by combat AI diagnostics. */
+	FString GetTechniqueRejectionReason(const FCombatTechniqueRequest& Request) const;
+
 	// =====================================================================
 	// Objective execution state (observation; consumed by both controller kinds)
 	// =====================================================================

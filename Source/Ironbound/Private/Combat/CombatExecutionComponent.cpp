@@ -211,6 +211,30 @@ bool UCombatExecutionComponent::CanExecuteTechnique(
 		   HasAdmissionSlot(ExecutionKind(Row->Kind));
 }
 
+FString UCombatExecutionComponent::GetTechniqueRejectionReason(
+	const FCombatTechniqueRequest& Request) const
+{
+	const FCombatTechniqueRow* Row = nullptr;
+	FText ValidationReason;
+	if (!ValidateRequest(Request, Row, ValidationReason))
+	{
+		return ValidationReason.ToString();
+	}
+	if (!HasAdmissionSlot(ExecutionKind(Row->Kind)))
+	{
+		return TEXT("no admission slot");
+	}
+	if (!Row->ExecutionConfig)
+	{
+		return TEXT("row has no execution config");
+	}
+	if (!Row->ExecutionConfig->ExecutorClass)
+	{
+		return TEXT("execution config has no executor class");
+	}
+	return FString();
+}
+
 bool UCombatExecutionComponent::ValidateRequest(
 	const FCombatTechniqueRequest& Request,
 	const FCombatTechniqueRow*& OutRow,
@@ -251,13 +275,15 @@ bool UCombatExecutionComponent::ValidateRequest(
 
 	if (!Techniques->IsAvailable(Request.TechniqueId))
 	{
-		OutReason = FText::FromString(TEXT("technique not available (repertoire/skills/equipment)"));
+		OutReason = FText::FromString(
+			Techniques->GetAvailabilityFailureReason(Request.TechniqueId));
 		return false;
 	}
 
 	if (!Techniques->CanExecute(Request.TechniqueId, Request))
 	{
-		OutReason = FText::FromString(TEXT("transient execution validation failed"));
+		OutReason = FText::FromString(
+			Techniques->GetExecutionFailureReason(Request.TechniqueId, Request));
 		return false;
 	}
 
@@ -1045,13 +1071,30 @@ void UCombatExecutionComponent::ResolveStrikeContacts(float DeltaTime)
 
 		Record.bContactResolved = true;
 		const FCombatTechniqueRow* AttackRow = Techniques->FindRow(Record.TechniqueId);
+		const UExecConfig_MeleeStrike* StrikeConfig = AttackRow
+			? Cast<UExecConfig_MeleeStrike>(AttackRow->ExecutionConfig)
+			: nullptr;
+		USkeletalMeshComponent* DefenderMesh = Defender->FindComponentByClass<USkeletalMeshComponent>();
 		FCombatInteraction Interaction;
 		Interaction.Source = Attacker;
 		Interaction.Receiver = Defender;
 		Interaction.SourceTechniqueId = Record.TechniqueId;
 		Interaction.ContactPoint = Contact.ImpactPoint;
 		Interaction.ContactNormal = Contact.ImpactNormal;
-		Interaction.BodyRegion = Contact.BoneName;
+		bool bUsedFallbackBodyRegion = false;
+		Interaction.BodyRegion = UCombatInteractionLibrary::ResolveBodyRegion(
+			StrikeConfig ? StrikeConfig->CombatTargets : nullptr,
+			DefenderMesh,
+			Contact.BoneName,
+			Contact.ImpactPoint,
+			Interaction.BodyBone,
+			bUsedFallbackBodyRegion);
+		UE_LOG(LogIronboundCombat, Log,
+			TEXT("[CONTACT] REGION_RESOLVED plan=%d hitBone=%s region=%s resolvedBone=%s method=%s impact=%s"),
+			Record.PlanId, *Contact.BoneName.ToString(), *Interaction.BodyRegion.ToString(),
+			*Interaction.BodyBone.ToString(),
+			bUsedFallbackBodyRegion ? TEXT("NearestConfiguredAnatomicalVolume") : TEXT("PhysicsBone"),
+			*Contact.ImpactPoint.ToCompactString());
 		Interaction.ReceiverComponent = Contact.GetComponent();
 		Interaction.Impulse = Contact.ImpactNormal * Record.ActualTipSpeedCmPerSec;
 		Interaction.WeaponTipSpeed = Record.ActualTipSpeedCmPerSec;
@@ -1087,7 +1130,10 @@ void UCombatExecutionComponent::ResolveStrikeContacts(float DeltaTime)
 		}
 
 		const FCombatInteractionResult Result =
-			UCombatInteractionLibrary::Resolve(Interaction, Techniques->TechniquesTable);
+			UCombatInteractionLibrary::ResolveWithTargets(
+				Interaction,
+				Techniques->TechniquesTable,
+				StrikeConfig ? StrikeConfig->CombatTargets : nullptr);
 		if (Reaction->ReceiveInteraction(Interaction, Result))
 		{
 			if (UCombatBodyComponent* Body =
@@ -1096,9 +1142,10 @@ void UCombatExecutionComponent::ResolveStrikeContacts(float DeltaTime)
 				Body->ApplyHitReaction(Weapon, Contact);
 			}
 			UE_LOG(LogIronboundCombat, Log,
-				TEXT("Strike hit [%s | %s -> %s] damage=%.1f plan=%d component=%s point=%s"),
+				TEXT("Strike hit [%s | %s -> %s] damage=%.1f region=%s bone=%s plan=%d component=%s point=%s"),
 				*GetNameSafe(Attacker), *Record.TechniqueId.ToString(),
-				*GetNameSafe(Defender), Result.Damage, Record.PlanId,
+				*GetNameSafe(Defender), Result.Damage, *Interaction.BodyRegion.ToString(),
+				*Interaction.BodyBone.ToString(), Record.PlanId,
 				*GetNameSafe(Contact.GetComponent()), *Contact.ImpactPoint.ToCompactString());
 		}
 		else

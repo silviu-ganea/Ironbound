@@ -136,14 +136,14 @@ public:
 	/** Maximum miss accepted when an AI commits a previously selected opportunity. */
 	static constexpr float MaxOpportunityContactMissCm = 12.f;
 
-	/** Query the current position and bounded nearby stances with the shared contact evaluator. */
+	/** Query viable contact opportunities by target region and stance. */
 	static void FindAttackOpportunities(
 		USkeletalMeshComponent* AttackerMesh, USkeletalMeshComponent* VictimMesh,
 		const FBladeTrajectory& Trajectory, const UDataTable* CombatTargets,
 		FName TechniqueId, FName RequiredRegion, float AimPointAlongBlade,
 		float AimWindowStartFraction, float AimWindowEndFraction,
 		float FacingLimitDegrees, float ContactToleranceCm, float MaxNearbyMoveCm,
-		FCombatAttackOpportunity& OutCurrent, FCombatAttackOpportunity& OutNearby);
+		TArray<FCombatAttackOpportunity>& OutOpportunities);
 	/**
 	 * Analyze the complete source animation and derive its active blade path.
 	 * Sampling count and active strike window are determined internally.

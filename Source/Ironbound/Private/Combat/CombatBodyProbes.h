@@ -29,6 +29,14 @@ namespace CombatBodyProbes
 			{ TEXT("spine_01"), 30.f },
 			{ TEXT("spine_02"), 31.f },
 			{ TEXT("spine_03"), 30.f },
+			{ TEXT("clavicle_l"), 12.f },
+			{ TEXT("upperarm_l"), 14.f },
+			{ TEXT("lowerarm_l"), 12.f },
+			{ TEXT("hand_l"), 9.f },
+			{ TEXT("clavicle_r"), 12.f },
+			{ TEXT("upperarm_r"), 14.f },
+			{ TEXT("lowerarm_r"), 12.f },
+			{ TEXT("hand_r"), 9.f },
 			{ TEXT("neck_01"), 24.f },
 			{ TEXT("head"), 28.f }
 		};
