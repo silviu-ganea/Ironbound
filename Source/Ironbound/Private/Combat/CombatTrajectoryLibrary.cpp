@@ -826,17 +826,58 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 			Region, Bone, Sample, Score, RequiredRegion, AimPointAlongBlade,
 			AimWindowStartFraction, AimWindowEndFraction, NAME_None, true);
 		const bool bFeasible = Sample != INDEX_NONE &&
-			Miss <= FMath::Min(ContactToleranceCm, 12.f);
+			Miss <= FMath::Min(ContactToleranceCm, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm);
 		const float Standoff = FVector::Dist2D(Location, Target);
 		const float Quality = bFeasible
 			? (IsPrimaryContactBone(Bone) ? 60.f : 0.f) + Score * 0.1f +
-				Standoff * 0.5f - Miss * 4.f
+				Standoff - Miss * 0.25f
 			: 0.f;
-		const float Utility = Quality - MoveCost * 0.03f;
-		const float BestUtility = Best.Quality - Best.MovementCostCm * 0.03f;
-		if ((!bFeasible && Best.bFeasible) ||
-			(bFeasible && Best.bFeasible && Utility <= BestUtility + KINDA_SMALL_NUMBER) ||
-			(!bFeasible && !Best.bFeasible && Miss >= Best.MissCm))
+
+		bool bBetter = false;
+		if (bFeasible)
+		{
+			if (!Best.bFeasible)
+			{
+				bBetter = true;
+			}
+			else if (Standoff > Best.StandoffCm + 1.f)
+			{
+				// Among valid strikes, first keep the attacker at the greatest
+				// reachable standoff. Contact margin breaks ties at the same range.
+				bBetter = true;
+			}
+			else if (FMath::IsNearlyEqual(Standoff, Best.StandoffCm, 1.f))
+			{
+				const bool bPrimaryContact = IsPrimaryContactBone(Bone);
+				const bool bBestPrimaryContact = IsPrimaryContactBone(Best.Bone);
+				if (bPrimaryContact != bBestPrimaryContact)
+				{
+					bBetter = bPrimaryContact;
+				}
+				else if (Score > Best.ContactScore + KINDA_SMALL_NUMBER)
+				{
+					bBetter = true;
+				}
+				else if (FMath::IsNearlyEqual(Score, Best.ContactScore))
+				{
+					if (MoveCost < Best.MovementCostCm - 5.f)
+					{
+						bBetter = true;
+					}
+					else if (FMath::IsNearlyEqual(MoveCost, Best.MovementCostCm, 5.f))
+					{
+						bBetter = Miss < Best.MissCm - 0.1f ||
+							(FMath::IsNearlyEqual(Miss, Best.MissCm, 0.1f) && Quality > Best.Quality);
+					}
+				}
+			}
+		}
+		else if (!Best.bFeasible && Miss < Best.MissCm)
+		{
+			bBetter = true;
+		}
+
+		if (!bBetter)
 		{
 			return;
 		}

@@ -10,18 +10,43 @@
 #include "Combat/CombatReactionComponent.h"
 #include "Combat/CombatInteractionLibrary.h"
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/CombatBodyComponent.h"
 #include "Combat/IronboundCombatAIController.h"
 #include "Combat/CombatTechniqueRow.h"
 #include "Engine/DataTable.h"
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "CollisionQueryParams.h"
 #include "Engine/World.h"
 #include "Ironbound.h"
 
 namespace
 {
+	bool GetActualBladeWorldSegment(
+		AActor* Fighter,
+		UStaticMeshComponent*& OutWeapon,
+		FVector& OutBase,
+		FVector& OutTip)
+	{
+		OutWeapon = nullptr;
+		OutBase = FVector::ZeroVector;
+		OutTip = FVector::ZeroVector;
+		UCombatEquipmentComponent* Equipment = Fighter
+			? Fighter->FindComponentByClass<UCombatEquipmentComponent>() : nullptr;
+		if (!Equipment || !Equipment->bReady || !Equipment->Definition || !Equipment->GetWeapon())
+		{
+			return false;
+		}
+
+		OutWeapon = Equipment->GetWeapon();
+		const FTransform WeaponTransform = OutWeapon->GetComponentTransform();
+		OutBase = WeaponTransform.TransformPosition(Equipment->Definition->BladeBase);
+		OutTip = WeaponTransform.TransformPosition(Equipment->Definition->BladeTip);
+		return !OutBase.ContainsNaN() && !OutTip.ContainsNaN();
+	}
+
 	ECombatExecutionKind ExecutionKind(ECombatTechniqueKind Kind)
 	{
 		return Kind == ECombatTechniqueKind::Reactive
@@ -328,12 +353,68 @@ FCombatCommittedStrike UCombatExecutionComponent::GetCommittedStrike() const
 	{
 		Strike.bValid = true;
 		Strike.TechniqueId = Record->TechniqueId;
+		Strike.PlanId = Record->PlanId;
 		Strike.Attacker = GetOwner();
 		Strike.Trajectory = Record->CommittedTrajectory;
 		Strike.Transform = Record->CommittedTransform;
 	}
 
 	return Strike;
+}
+
+void UCombatExecutionComponent::ConfirmParryInterception(
+	AActor* Attacker,
+	int32 AttackPlanId,
+	FName AttackTechniqueId,
+	FName ParryTechniqueId,
+	float BladeDistanceCm,
+	float CrossingAngleDegrees)
+{
+	if (!Attacker || AttackTechniqueId.IsNone())
+	{
+		return;
+	}
+
+	ConfirmedParryAttacker = Attacker;
+	ConfirmedParryAttackPlanId = AttackPlanId;
+	ConfirmedParryAttackTechniqueId = AttackTechniqueId;
+	ConfirmedParryTechniqueId = ParryTechniqueId;
+	ConfirmedParryExpiresAt = GetWorld() ? GetWorld()->GetTimeSeconds() + 0.5f : 0.f;
+	bHasConfirmedParry = true;
+
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("Parry interception confirmed [%s | %s -> %s] plan=%d distance=%.1fcm crossing=%.1fdeg"),
+		*GetNameSafe(Attacker), *AttackTechniqueId.ToString(), *GetNameSafe(GetOwner()),
+		AttackPlanId, BladeDistanceCm, CrossingAngleDegrees);
+}
+
+bool UCombatExecutionComponent::ConsumeConfirmedParry(
+	AActor* Attacker,
+	int32 AttackPlanId,
+	FName AttackTechniqueId,
+	FName& OutParryTechniqueId)
+{
+	OutParryTechniqueId = NAME_None;
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	if (!bHasConfirmedParry || Now > ConfirmedParryExpiresAt)
+	{
+		bHasConfirmedParry = false;
+		ConfirmedParryAttacker.Reset();
+		return false;
+	}
+
+	const bool bMatchingAttack = ConfirmedParryAttacker.Get() == Attacker &&
+		ConfirmedParryAttackTechniqueId == AttackTechniqueId &&
+		ConfirmedParryAttackPlanId == AttackPlanId;
+	if (!bMatchingAttack)
+	{
+		return false;
+	}
+
+	OutParryTechniqueId = ConfirmedParryTechniqueId;
+	bHasConfirmedParry = false;
+	ConfirmedParryAttacker.Reset();
+	return true;
 }
 
 bool UCombatExecutionComponent::IsAligning() const
@@ -570,7 +651,61 @@ void UCombatExecutionComponent::SetRecordStrikeWindow(int32 RecordId, bool bOpen
 {
 	if (FCombatExecutionRecord* Record = FindRecord(RecordId))
 	{
+		if (Record->bStrikeWindowOpen == bOpen)
+		{
+			return;
+		}
+
+		if (bOpen)
+		{
+			Record->ContactWindowEvaluations = 0;
+			Record->ContactWindowSweeps = 0;
+			Record->ContactWindowBlockingHits = 0;
+			Record->ContactWindowExpectedTargetHits = 0;
+			Record->bContactWindowGateLogged = false;
+			Record->bContactWindowQueryLogged = false;
+			Record->bContactWindowFirstHitLogged = false;
+			Record->ContactWindowLastHitActor = NAME_None;
+			Record->ContactWindowLastHitComponent = NAME_None;
+			Record->ContactWindowLastHitPoint = FVector::ZeroVector;
+			Record->ActualTipSpeedCmPerSec = 0.f;
+			UStaticMeshComponent* Weapon = nullptr;
+			Record->bHasPreviousActualBladeSample = GetActualBladeWorldSegment(
+				GetOwner(), Weapon, Record->PreviousActualBladeBase, Record->PreviousActualBladeTip);
+			if (!Record->bHasPreviousActualBladeSample)
+			{
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[CONTACT] WINDOW_BEGIN PlanId=%d Record=%d result=Rejected reason=ActualWeaponGeometryUnavailable"),
+					Record->PlanId, Record->RecordId);
+			}
+		}
+		else
+		{
+			const TCHAR* Result = Record->bContactResolved ? TEXT("ContactResolved")
+				: Record->ContactWindowSweeps == 0 ? TEXT("NoCollisionSweeps")
+				: Record->ContactWindowBlockingHits == 0 ? TEXT("NoBlockingHit")
+				: Record->ContactWindowExpectedTargetHits == 0 ? TEXT("OnlyUnexpectedActorHits")
+				: TEXT("ExpectedActorHitRejectedAfterQuery");
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[CONTACT] WINDOW_END PlanId=%d Record=%d Technique=%s expected=%s evaluations=%d sweeps=%d blockingHits=%d expectedHits=%d lastActor=%s lastComponent=%s lastPoint=%s resolved=%d result=%s channel=Pawn sphereRadius=%.1fcm"),
+				Record->PlanId, Record->RecordId, *Record->TechniqueId.ToString(),
+				*GetNameSafe(Record->Target), Record->ContactWindowEvaluations,
+				Record->ContactWindowSweeps, Record->ContactWindowBlockingHits,
+				Record->ContactWindowExpectedTargetHits,
+				*Record->ContactWindowLastHitActor.ToString(),
+				*Record->ContactWindowLastHitComponent.ToString(),
+				*Record->ContactWindowLastHitPoint.ToCompactString(),
+				Record->bContactResolved ? 1 : 0, Result, StrikeSweepRadiusCm);
+		}
+
 		Record->bStrikeWindowOpen = bOpen;
+		UE_LOG(LogIronboundCombat, Log,
+			TEXT("[COMBAT] STRIKE_WINDOW PlanId=%d Record=%d Technique=%s state=%s committed=%d trajectoryValid=%d segments=%d target=%s"),
+			Record->PlanId, Record->RecordId, *Record->TechniqueId.ToString(),
+			bOpen ? TEXT("Open") : TEXT("Closed"),
+			Record->State == ECombatExecutionState::Committed ? 1 : 0,
+			Record->bCommittedTrajectoryValid ? 1 : 0,
+			Record->CommittedTrajectory.Segments.Num(), *GetNameSafe(Record->Target));
 	}
 }
 
@@ -594,7 +729,7 @@ void UCombatExecutionComponent::SetStrikeWindowOpen(bool bOpen)
 		if (Record.Kind == ECombatExecutionKind::Deliberate &&
 			Record.State == ECombatExecutionState::Committed)
 		{
-			Record.bStrikeWindowOpen = bOpen;
+			SetRecordStrikeWindow(Record.RecordId, bOpen);
 			return;
 		}
 	}
@@ -743,12 +878,12 @@ void UCombatExecutionComponent::TickComponent(
 		}
 	}
 
-	ResolveStrikeContacts();
+	ResolveStrikeContacts(DeltaTime);
 
 	BroadcastRequirement();
 }
 
-void UCombatExecutionComponent::ResolveStrikeContacts()
+void UCombatExecutionComponent::ResolveStrikeContacts(float DeltaTime)
 {
 	AActor* Attacker = GetOwner();
 	UWorld* World = GetWorld();
@@ -762,19 +897,76 @@ void UCombatExecutionComponent::ResolveStrikeContacts()
 	{
 		if (Record.Kind != ECombatExecutionKind::Deliberate ||
 			Record.State != ECombatExecutionState::Committed ||
-			!Record.bStrikeWindowOpen ||
-			Record.bContactResolved ||
-			!Record.bCommittedTrajectoryValid ||
-			!Record.Target ||
+			!Record.bStrikeWindowOpen)
+		{
+			continue;
+		}
+
+		++Record.ContactWindowEvaluations;
+		UStaticMeshComponent* Weapon = nullptr;
+		FVector ActualBladeBase = FVector::ZeroVector;
+		FVector ActualBladeTip = FVector::ZeroVector;
+		if (!GetActualBladeWorldSegment(Attacker, Weapon, ActualBladeBase, ActualBladeTip))
+		{
+			if (!Record.bContactWindowGateLogged)
+			{
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[CONTACT] GATE PlanId=%d Record=%d result=Rejected reason=ActualWeaponGeometryUnavailable expected=%s"),
+					Record.PlanId, Record.RecordId, *GetNameSafe(Record.Target));
+				Record.bContactWindowGateLogged = true;
+			}
+			Record.bHasPreviousActualBladeSample = false;
+			continue;
+		}
+		if (!Record.bHasPreviousActualBladeSample)
+		{
+			Record.PreviousActualBladeBase = ActualBladeBase;
+			Record.PreviousActualBladeTip = ActualBladeTip;
+			Record.bHasPreviousActualBladeSample = true;
+			continue;
+		}
+		const FVector PreviousBladeBase = Record.PreviousActualBladeBase;
+		const FVector PreviousBladeTip = Record.PreviousActualBladeTip;
+		if (DeltaTime > SMALL_NUMBER)
+		{
+			Record.ActualTipSpeedCmPerSec = FVector::Distance(PreviousBladeTip, ActualBladeTip) / DeltaTime;
+		}
+		Record.PreviousActualBladeBase = ActualBladeBase;
+		Record.PreviousActualBladeTip = ActualBladeTip;
+
+		if (Record.bContactResolved)
+		{
+			continue;
+		}
+		if (!Record.bCommittedTrajectoryValid || !Record.Target ||
 			!Record.CommittedTrajectory.bValid)
 		{
+			if (!Record.bContactWindowGateLogged)
+			{
+				UE_LOG(LogIronboundCombat, Warning,
+					TEXT("[CONTACT] GATE PlanId=%d Record=%d result=Rejected reason=%s target=%s trajectoryValid=%d segments=%d"),
+					Record.PlanId, Record.RecordId,
+					!Record.Target ? TEXT("MissingExpectedTarget") : TEXT("CommittedTrajectoryInvalid"),
+					*GetNameSafe(Record.Target), Record.bCommittedTrajectoryValid ? 1 : 0,
+					Record.CommittedTrajectory.Segments.Num());
+				Record.bContactWindowGateLogged = true;
+			}
 			continue;
 		}
 
 		AActor* Defender = Record.Target;
 		UCombatReactionComponent* Reaction =
 			Defender->FindComponentByClass<UCombatReactionComponent>();
-		if (!Reaction || !Reaction->CanReceiveCombatHit())
+		const bool bCanReceiveHit = Reaction && Reaction->CanReceiveCombatHit();
+		if (!Record.bContactWindowGateLogged)
+		{
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[CONTACT] GATE PlanId=%d Record=%d expected=%s reaction=%s CanReceiveCombatHit=%d"),
+				Record.PlanId, Record.RecordId, *GetNameSafe(Defender),
+				*GetNameSafe(Reaction), bCanReceiveHit ? 1 : 0);
+			Record.bContactWindowGateLogged = true;
+		}
+		if (!bCanReceiveHit)
 		{
 			continue;
 		}
@@ -784,23 +976,65 @@ void UCombatExecutionComponent::ResolveStrikeContacts()
 		FHitResult Contact;
 		bool bContactFound = false;
 		const FCollisionShape SweepShape = FCollisionShape::MakeSphere(FMath::Max(0.1f, StrikeSweepRadiusCm));
-
-		for (const FBladeSegment& Segment : Record.CommittedTrajectory.Segments)
+		if (!Record.bContactWindowQueryLogged)
 		{
-			const FVector Start = Record.CommittedTransform.TransformPosition(Segment.Base);
-			const FVector End = Record.CommittedTransform.TransformPosition(Segment.Tip);
-			if (World->SweepSingleByChannel(
+			const FTransform WeaponTransform = Weapon ? Weapon->GetComponentTransform() : FTransform::Identity;
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[CONTACT] QUERY_BEGIN PlanId=%d Record=%d expected=%s method=ActualWeaponPointMotion channel=Pawn sphereRadius=%.1fcm predictedSegments=%d committedRoot=%s weapon=%s actualWeaponLoc=%s actualWeaponRot=%s actualBladeBase=%s actualBladeTip=%s"),
+				Record.PlanId, Record.RecordId, *GetNameSafe(Defender), StrikeSweepRadiusCm,
+				Record.CommittedTrajectory.Segments.Num(),
+				*Record.CommittedTransform.GetLocation().ToCompactString(), *GetNameSafe(Weapon),
+				*WeaponTransform.GetLocation().ToCompactString(),
+				*WeaponTransform.Rotator().ToCompactString(),
+				*ActualBladeBase.ToCompactString(), *ActualBladeTip.ToCompactString());
+			Record.bContactWindowQueryLogged = true;
+		}
+
+		const float BladeLength = FMath::Max(
+			FVector::Distance(PreviousBladeBase, PreviousBladeTip),
+			FVector::Distance(ActualBladeBase, ActualBladeTip));
+		const float SampleSpacingCm = FMath::Max(2.f * StrikeSweepRadiusCm, 4.f);
+		const int32 BladeIntervals = FMath::Clamp(
+			FMath::CeilToInt(BladeLength / SampleSpacingCm), 1, 32);
+		for (int32 BladeSample = 0; BladeSample <= BladeIntervals; ++BladeSample)
+		{
+			const float BladeFraction = static_cast<float>(BladeSample) / BladeIntervals;
+			const FVector Start = FMath::Lerp(PreviousBladeBase, PreviousBladeTip, BladeFraction);
+			const FVector End = FMath::Lerp(ActualBladeBase, ActualBladeTip, BladeFraction);
+			++Record.ContactWindowSweeps;
+			const bool bBlockingHit = World->SweepSingleByChannel(
 				Contact,
 				Start,
 				End,
 				FQuat::Identity,
 				ECC_Pawn,
 				SweepShape,
-				QueryParams) &&
-				Contact.GetActor() == Defender)
+				QueryParams);
+			if (bBlockingHit)
 			{
-				bContactFound = true;
-				break;
+				++Record.ContactWindowBlockingHits;
+				Record.ContactWindowLastHitActor = Contact.GetActor()
+					? Contact.GetActor()->GetFName() : NAME_None;
+				Record.ContactWindowLastHitComponent = Contact.GetComponent()
+					? Contact.GetComponent()->GetFName() : NAME_None;
+				Record.ContactWindowLastHitPoint = Contact.ImpactPoint;
+				if (!Record.bContactWindowFirstHitLogged)
+				{
+					UE_LOG(LogIronboundCombat, Log,
+						TEXT("[CONTACT] SWEEP_HIT PlanId=%d Record=%d expected=%s actualActor=%s actualComponent=%s channel=Pawn start=%s end=%s impact=%s result=%s"),
+						Record.PlanId, Record.RecordId, *GetNameSafe(Defender),
+						*GetNameSafe(Contact.GetActor()), *GetNameSafe(Contact.GetComponent()),
+						*Start.ToCompactString(), *End.ToCompactString(),
+						*Contact.ImpactPoint.ToCompactString(),
+						Contact.GetActor() == Defender ? TEXT("ExpectedTarget") : TEXT("RejectedUnexpectedActor"));
+					Record.bContactWindowFirstHitLogged = true;
+				}
+				if (Contact.GetActor() == Defender)
+				{
+					++Record.ContactWindowExpectedTargetHits;
+					bContactFound = true;
+					break;
+				}
 			}
 		}
 
@@ -819,52 +1053,62 @@ void UCombatExecutionComponent::ResolveStrikeContacts()
 		Interaction.ContactNormal = Contact.ImpactNormal;
 		Interaction.BodyRegion = Contact.BoneName;
 		Interaction.ReceiverComponent = Contact.GetComponent();
-		Interaction.Impulse = Contact.ImpactNormal * Record.CommittedTrajectory.PeakTipSpeed;
-		Interaction.WeaponTipSpeed = Record.CommittedTrajectory.PeakTipSpeed;
+		Interaction.Impulse = Contact.ImpactNormal * Record.ActualTipSpeedCmPerSec;
+		Interaction.WeaponTipSpeed = Record.ActualTipSpeedCmPerSec;
 		if (const UCombatEquipmentComponent* Equipment =
 				Attacker->FindComponentByClass<UCombatEquipmentComponent>())
 		{
 			Interaction.SourceComponent = Equipment->GetWeapon();
 		}
 
-		bool bBlocked = false;
-		if (UCombatExecutionComponent* DefenderExecution =
-				Defender->FindComponentByClass<UCombatExecutionComponent>())
+		FName MatchedParryTechniqueId;
+		UCombatExecutionComponent* DefenderExecution =
+			Defender->FindComponentByClass<UCombatExecutionComponent>();
+		if (DefenderExecution && DefenderExecution->ConsumeConfirmedParry(
+			Attacker, Record.PlanId, Record.TechniqueId, MatchedParryTechniqueId))
 		{
-			for (const FName ActiveId : DefenderExecution->GetActiveTechniqueIds())
-			{
-				const FCombatTechniqueRow* DefensiveRow =
-					DefenderExecution->GetTechniques()->FindRow(ActiveId);
-				if (DefensiveRow && DefensiveRow->Kind == ECombatTechniqueKind::Reactive &&
-					DefensiveRow->bBlocksIncomingStrike)
-				{
-					Interaction.ReceiverTechniqueId = ActiveId;
-					bBlocked = true;
-					break;
-				}
-			}
-		}
-
-		if (bBlocked)
-		{
+			Interaction.ReceiverTechniqueId = MatchedParryTechniqueId;
 			UE_LOG(LogIronboundCombat, Log,
-				TEXT("Strike blocked [%s | %s] by [%s | %s]"),
-				*GetNameSafe(Attacker), *Record.TechniqueId.ToString(),
-				*GetNameSafe(Defender), *Interaction.ReceiverTechniqueId.ToString());
+				TEXT("Strike blocked [%s | %s -> %s] by confirmed weapon interception [%s] plan=%d component=%s point=%s"),
+				*GetNameSafe(Attacker), *Record.TechniqueId.ToString(), *GetNameSafe(Defender),
+				*MatchedParryTechniqueId.ToString(), Record.PlanId,
+				*GetNameSafe(Contact.GetComponent()), *Contact.ImpactPoint.ToCompactString());
 			continue;
 		}
 
-		if (AttackRow)
+		if (!AttackRow)
 		{
-			const FCombatInteractionResult Result =
-				UCombatInteractionLibrary::Resolve(Interaction, Techniques->TechniquesTable);
-			if (Reaction->ReceiveInteraction(Interaction, Result))
+			UE_LOG(LogIronboundCombat, Warning,
+				TEXT("[CONTACT] DAMAGE_REJECT PlanId=%d reason=MissingTechniqueRow technique=%s actor=%s component=%s point=%s"),
+				Record.PlanId, *Record.TechniqueId.ToString(),
+				*GetNameSafe(Contact.GetActor()), *GetNameSafe(Contact.GetComponent()),
+				*Contact.ImpactPoint.ToCompactString());
+			continue;
+		}
+
+		const FCombatInteractionResult Result =
+			UCombatInteractionLibrary::Resolve(Interaction, Techniques->TechniquesTable);
+		if (Reaction->ReceiveInteraction(Interaction, Result))
+		{
+			if (UCombatBodyComponent* Body =
+					Defender->FindComponentByClass<UCombatBodyComponent>())
 			{
-				UE_LOG(LogIronboundCombat, Log,
-					TEXT("Strike hit [%s | %s -> %s] damage=%.1f"),
-					*GetNameSafe(Attacker), *Record.TechniqueId.ToString(),
-					*GetNameSafe(Defender), Result.Damage);
+				Body->ApplyHitReaction(Weapon, Contact);
 			}
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("Strike hit [%s | %s -> %s] damage=%.1f plan=%d component=%s point=%s"),
+				*GetNameSafe(Attacker), *Record.TechniqueId.ToString(),
+				*GetNameSafe(Defender), Result.Damage, Record.PlanId,
+				*GetNameSafe(Contact.GetComponent()), *Contact.ImpactPoint.ToCompactString());
+		}
+		else
+		{
+			UE_LOG(LogIronboundCombat, Warning,
+				TEXT("[CONTACT] DAMAGE_REJECT PlanId=%d resultAccepted=%d damage=%.2f CanReceiveCombatHit=%d actor=%s component=%s point=%s"),
+				Record.PlanId, Result.bAccepted ? 1 : 0, Result.Damage,
+				Reaction->CanReceiveCombatHit() ? 1 : 0,
+				*GetNameSafe(Contact.GetActor()), *GetNameSafe(Contact.GetComponent()),
+				*Contact.ImpactPoint.ToCompactString());
 		}
 	}
 }

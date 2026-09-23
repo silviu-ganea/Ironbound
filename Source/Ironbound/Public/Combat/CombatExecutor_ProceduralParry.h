@@ -103,6 +103,11 @@ struct FParryDiagnostics
 	float BestRequiredHandSpeed = -1.f;
 	float BestRequiredBladeAngularSpeed = -1.f;
 	float BestQuality = -1.f;
+	float BestAnatomyReachDeficitCm = TNumericLimits<float>::Max();
+	float FailedCandidateHandDistanceCm = -1.f;
+	float FailedCandidateMinReachCm = -1.f;
+	float FailedCandidateMaxReachCm = -1.f;
+	float FailedCandidateIncomingFraction = -1.f;
 };
 
 /**
@@ -224,6 +229,14 @@ private:
 		float PlannedCross = 0.f;
 		float ClosestDistance = TNumericLimits<float>::Max();
 		float CrossAtClosest = -1.f;
+		float ConfirmedDistance = -1.f;
+		float ConfirmedCross = -1.f;
+		FVector PreviousAttackerBase = FVector::ZeroVector;
+		FVector PreviousAttackerTip = FVector::ZeroVector;
+		FVector PreviousDefenderBase = FVector::ZeroVector;
+		FVector PreviousDefenderTip = FVector::ZeroVector;
+		bool bHasPreviousWeaponSamples = false;
+		bool bInterceptionConfirmed = false;
 		bool bTracking = false;
 	};
 

@@ -3,6 +3,7 @@
 #include "Combat/CombatBodyComponent.h"
 #include "Combat/CombatBodyProbes.h"
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/CombatExecutionComponent.h"
 #include "Combat/WeaponDefinition.h"
 #include "Combat/CombatTechniqueExecutionConfigs.h"
 #include "Animation/Skeleton.h"
@@ -470,6 +471,17 @@ bool UCombatExecutor_ProceduralParry::EvaluateCandidate(
 		if (ExtensionMetrics.Distance < ExtensionMetrics.MinReach ||
 			ExtensionMetrics.Distance > ExtensionMetrics.MaxReach)
 		{
+			const float ReachDeficit = FMath::Max(
+				ExtensionMetrics.MinReach - ExtensionMetrics.Distance,
+				ExtensionMetrics.Distance - ExtensionMetrics.MaxReach);
+			if (ReachDeficit < LastDiagnostics.BestAnatomyReachDeficitCm)
+			{
+				LastDiagnostics.BestAnatomyReachDeficitCm = ReachDeficit;
+				LastDiagnostics.FailedCandidateHandDistanceCm = ExtensionMetrics.Distance;
+				LastDiagnostics.FailedCandidateMinReachCm = ExtensionMetrics.MinReach;
+				LastDiagnostics.FailedCandidateMaxReachCm = ExtensionMetrics.MaxReach;
+				LastDiagnostics.FailedCandidateIncomingFraction = IncomingBladeFraction;
+			}
 			continue;
 		}
 		const FVector NeutralForearmDir = CalculateNeutralForearmDirection(HandTransform);
@@ -786,12 +798,18 @@ void UCombatExecutor_ProceduralParry::LogDiagnosticsOnce() const
 	if (bDiagnosticsLogged) return;
 	bDiagnosticsLogged = true;
 	UE_LOG(LogTemp, Warning,
-		TEXT("ParryDiag [%s] gen=%d valid=%d | reach=%d angle=%d anatomy=%d body=%d time=%d speed=%d | bestQ=%.2f t=%.3f hand=%.0f blade=%.0f | %s"),
+		TEXT("ParryDiag [%s] gen=%d valid=%d | broadReach=%d angle=%d anatomy=%d body=%d time=%d speed=%d | nearestArmFail=%.1fcm hand=%.1fcm arm=[%.1f,%.1f] incomingFraction=%.2f | bestQ=%.2f t=%.3f handSpeed=%.0f bladeSpeed=%.0f | %s"),
 		*GetNameSafe(GetFighter()),
 		LastDiagnostics.GeneratedCandidates, LastDiagnostics.ValidCandidates,
 		LastDiagnostics.BroadReachRejected, LastDiagnostics.AngleRejected,
 		LastDiagnostics.AnatomyRejected, LastDiagnostics.BodyRejected,
 		LastDiagnostics.TimingRejected, LastDiagnostics.SpeedRejected,
+		LastDiagnostics.BestAnatomyReachDeficitCm < TNumericLimits<float>::Max()
+			? LastDiagnostics.BestAnatomyReachDeficitCm : -1.f,
+		LastDiagnostics.FailedCandidateHandDistanceCm,
+		LastDiagnostics.FailedCandidateMinReachCm,
+		LastDiagnostics.FailedCandidateMaxReachCm,
+		LastDiagnostics.FailedCandidateIncomingFraction,
 		LastDiagnostics.BestQuality, LastDiagnostics.BestTimeUntilContact,
 		LastDiagnostics.BestRequiredHandSpeed,
 		LastDiagnostics.BestRequiredBladeAngularSpeed,
@@ -951,6 +969,90 @@ void UCombatExecutor_ProceduralParry::OnTick(float DeltaTime)
 		ActualSample.CrossAtClosest = ActualCross;
 	}
 
+	const FCombatThreat& Threat = Request.ThreatContext.Threat;
+	UCombatEquipmentComponent* DefenderEquipment = GetEquipment();
+	UCombatEquipmentComponent* AttackerEquipment = Threat.Attacker
+		? Threat.Attacker->FindComponentByClass<UCombatEquipmentComponent>() : nullptr;
+	UStaticMeshComponent* DefenderWeapon = DefenderEquipment ? DefenderEquipment->GetWeapon() : nullptr;
+	UStaticMeshComponent* AttackerWeapon = AttackerEquipment ? AttackerEquipment->GetWeapon() : nullptr;
+	if (DefenderEquipment && DefenderEquipment->Definition && DefenderWeapon &&
+		AttackerEquipment && AttackerEquipment->Definition && AttackerWeapon)
+	{
+		const FTransform DefenderTransform = DefenderWeapon->GetComponentTransform();
+		const FTransform AttackerTransform = AttackerWeapon->GetComponentTransform();
+		const FVector DefenderBase = DefenderTransform.TransformPosition(DefenderEquipment->Definition->BladeBase);
+		const FVector DefenderTip = DefenderTransform.TransformPosition(DefenderEquipment->Definition->BladeTip);
+		const FVector AttackerBase = AttackerTransform.TransformPosition(AttackerEquipment->Definition->BladeBase);
+		const FVector AttackerTip = AttackerTransform.TransformPosition(AttackerEquipment->Definition->BladeTip);
+		if (ActualSample.bHasPreviousWeaponSamples)
+		{
+			float ClosestSweptDistance = TNumericLimits<float>::Max();
+			float CrossingAtClosest = -1.f;
+			constexpr int32 TemporalSamples = 4;
+			for (int32 SampleIndex = 0; SampleIndex <= TemporalSamples; ++SampleIndex)
+			{
+				const float Alpha = static_cast<float>(SampleIndex) / TemporalSamples;
+				const FVector SampleDefenderBase = FMath::Lerp(ActualSample.PreviousDefenderBase, DefenderBase, Alpha);
+				const FVector SampleDefenderTip = FMath::Lerp(ActualSample.PreviousDefenderTip, DefenderTip, Alpha);
+				const FVector SampleAttackerBase = FMath::Lerp(ActualSample.PreviousAttackerBase, AttackerBase, Alpha);
+				const FVector SampleAttackerTip = FMath::Lerp(ActualSample.PreviousAttackerTip, AttackerTip, Alpha);
+				FVector ClosestDefenderPoint, ClosestAttackerPoint;
+				FMath::SegmentDistToSegmentSafe(
+					SampleDefenderBase, SampleDefenderTip,
+					SampleAttackerBase, SampleAttackerTip,
+					ClosestDefenderPoint, ClosestAttackerPoint);
+				const float Distance = FVector::Distance(ClosestDefenderPoint, ClosestAttackerPoint);
+				if (Distance < ClosestSweptDistance)
+				{
+					ClosestSweptDistance = Distance;
+					const FVector DefenderDirection = (SampleDefenderTip - SampleDefenderBase).GetSafeNormal();
+					const FVector AttackerDirection = (SampleAttackerTip - SampleAttackerBase).GetSafeNormal();
+					const float AbsDot = FMath::Clamp(
+						FMath::Abs(FVector::DotProduct(DefenderDirection, AttackerDirection)), 0.f, 1.f);
+					CrossingAtClosest = FMath::RadiansToDegrees(FMath::Acos(AbsDot));
+				}
+			}
+
+			if (ClosestSweptDistance < ActualSample.ClosestDistance)
+			{
+				ActualSample.ClosestDistance = ClosestSweptDistance;
+				ActualSample.CrossAtClosest = CrossingAtClosest;
+			}
+
+			float CurrentSourceTime = Threat.CurrentSourceTime;
+			GetAttackerSourcePlaybackTime(CurrentSourceTime);
+			const float TimeUntilCandidate = ActiveParryCandidate.IncomingTime - CurrentSourceTime;
+			const bool bAtPredictedInterceptTime = Phase != EParryExecutionPhase::Recover &&
+				TimeUntilCandidate <= 0.15f && TimeUntilCandidate >= -0.15f;
+			constexpr float ActualBladeContactToleranceCm = 4.f;
+			if (!ActualSample.bInterceptionConfirmed && bAtPredictedInterceptTime &&
+				ClosestSweptDistance <= ActualBladeContactToleranceCm && CrossingAtClosest >= 60.f)
+			{
+				ActualSample.bInterceptionConfirmed = true;
+				ActualSample.ConfirmedDistance = ClosestSweptDistance;
+				ActualSample.ConfirmedCross = CrossingAtClosest;
+				if (UCombatExecutionComponent* Execution = GetExecutionComponent())
+				{
+					Execution->ConfirmParryInterception(
+						Threat.Attacker,
+						Threat.AttackerPlanId,
+						Threat.TechniqueId,
+						GetRequest().TechniqueId,
+						ClosestSweptDistance,
+						CrossingAtClosest);
+				}
+			}
+		}
+		else
+		{
+			ActualSample.bHasPreviousWeaponSamples = true;
+		}
+		ActualSample.PreviousDefenderBase = DefenderBase;
+		ActualSample.PreviousDefenderTip = DefenderTip;
+		ActualSample.PreviousAttackerBase = AttackerBase;
+		ActualSample.PreviousAttackerTip = AttackerTip;
+	}
+
 	switch (Phase)
 	{
 	case EParryExecutionPhase::Intercept:
@@ -1016,14 +1118,12 @@ void UCombatExecutor_ProceduralParry::OnFinish()
 	// Per-execution actual-crossing diagnostics (was the global ParryActual map).
 	if (ActualSample.bTracking)
 	{
-		if (ActualSample.CrossAtClosest >= 0.f)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedCross=%.0f actualCrossAtClosest=%.1f closest=%.1fcm"), *GetNameSafe(GetFighter()), ActualSample.PlannedCross, ActualSample.CrossAtClosest, ActualSample.ClosestDistance);
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("ParryActual [%s]: plannedCross=%.0f actualCrossAtClosest=N/A closest=N/A"), *GetNameSafe(GetFighter()), ActualSample.PlannedCross);
-		}
+		UE_LOG(LogTemp, Warning,
+			TEXT("ParryActual [%s]: result=%s plannedCross=%.0f actualCrossAtClosest=%.1f closest=%.1fcm confirmedDistance=%.1fcm confirmedCross=%.1fdeg"),
+			*GetNameSafe(GetFighter()),
+			ActualSample.bInterceptionConfirmed ? TEXT("ConfirmedInterception") : TEXT("NoInterception"),
+			ActualSample.PlannedCross, ActualSample.CrossAtClosest,
+			ActualSample.ClosestDistance, ActualSample.ConfirmedDistance, ActualSample.ConfirmedCross);
 
 		ActualSample = FActualParrySample();
 	}

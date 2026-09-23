@@ -133,6 +133,9 @@ class IRONBOUND_API UCombatTrajectoryLibrary : public UBlueprintFunctionLibrary
 	GENERATED_BODY()
 
 public:
+	/** Maximum miss accepted when an AI commits a previously selected opportunity. */
+	static constexpr float MaxOpportunityContactMissCm = 12.f;
+
 	/** Query the current position and bounded nearby stances with the shared contact evaluator. */
 	static void FindAttackOpportunities(
 		USkeletalMeshComponent* AttackerMesh, USkeletalMeshComponent* VictimMesh,

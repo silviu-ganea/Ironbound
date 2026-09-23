@@ -89,6 +89,24 @@ struct IRONBOUND_API FCombatExecutionRecord
 
 	UPROPERTY()
 	bool bCommittedTrajectoryValid = false;
+
+	/** Previous world-space weapon blade endpoints used for real-motion contact sweeps. */
+	FVector PreviousActualBladeBase = FVector::ZeroVector;
+	FVector PreviousActualBladeTip = FVector::ZeroVector;
+	float ActualTipSpeedCmPerSec = 0.f;
+	bool bHasPreviousActualBladeSample = false;
+
+	/** Event-based diagnostics for the current authored strike-window interval. */
+	int32 ContactWindowEvaluations = 0;
+	int32 ContactWindowSweeps = 0;
+	int32 ContactWindowBlockingHits = 0;
+	int32 ContactWindowExpectedTargetHits = 0;
+	bool bContactWindowGateLogged = false;
+	bool bContactWindowQueryLogged = false;
+	bool bContactWindowFirstHitLogged = false;
+	FName ContactWindowLastHitActor = NAME_None;
+	FName ContactWindowLastHitComponent = NAME_None;
+	FVector ContactWindowLastHitPoint = FVector::ZeroVector;
 };
 
 /**
@@ -172,6 +190,9 @@ struct IRONBOUND_API FCombatCommittedStrike
 
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Attack")
 	FName TechniqueId;
+
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Attack")
+	int32 PlanId = 0;
 
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Attack")
 	TObjectPtr<AActor> Attacker = nullptr;

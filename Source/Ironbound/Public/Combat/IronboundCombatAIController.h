@@ -75,7 +75,7 @@ public:
 
 	/** A feasible attack this much farther from the target is chosen before the preference roll. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0"))
-	float MinimumRangeGainForRepositionCm = 15.f;
+	float MinimumRangeGainForRepositionCm = 5.f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="10.0"))
 	float TargetDisplacementToleranceCm = 10.f;

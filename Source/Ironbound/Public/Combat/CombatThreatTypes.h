@@ -34,6 +34,10 @@ struct IRONBOUND_API FCombatThreat
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Threat")
 	FName TechniqueId;
 
+	/** Plan id of the committed attack that produced this threat. */
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Threat")
+	int32 AttackerPlanId = 0;
+
 	/** Committed blade trajectory in attacker root-local space (snapshot). */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Threat")
 	FBladeTrajectory SourceTrajectory;

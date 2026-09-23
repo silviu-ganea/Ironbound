@@ -458,10 +458,10 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 	}
 	const FName RequiredRegion = PreferredAttackTargetRegion.IsNone()
 		? Config->DefaultTargetRegion : PreferredAttackTargetRegion;
-	// The AI's overhead cut seeks a distal blade hit. Player requests retain the
-	// technique's authored blade policy; this is a tactical choice at the query.
-	const float PlanningAimPoint = Config->AimPointAlongBlade < 0.f
-		? 1.f : Config->AimPointAlongBlade;
+	// Planning follows the technique's authored contact policy: -1 means an
+	// ordinary cut may contact anywhere along the useful blade, while a thrust
+	// can explicitly request the tip.
+	const float PlanningAimPoint = Config->AimPointAlongBlade;
 	FCombatAttackOpportunity Current, Nearby;
 	UCombatTrajectoryLibrary::FindAttackOpportunities(AttackerMesh, TargetMesh, Trajectory,
 		Config->CombatTargets, TechniqueId, RequiredRegion, PlanningAimPoint,
@@ -469,7 +469,7 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 		Config->MaxFacingDeviationFromTargetDegrees, Config->ContactToleranceCm,
 		MaxNearbyMoveCm, Current, Nearby);
 	UE_LOG(LogIronboundCombat, Log,
-		TEXT("[AI] OPPORTUNITIES PlanId=%d aimBlade=%.2f Current feasible=%d region=%s bone=%s quality=%.1f tipMiss=%.1fcm range=%.1fcm; Nearby feasible=%d region=%s bone=%s quality=%.1f tipMiss=%.1fcm range=%.1fcm move=%.1fcm stance=%s"),
+		TEXT("[AI] OPPORTUNITIES PlanId=%d aimBlade=%.2f Current feasible=%d region=%s bone=%s quality=%.1f bladeMiss=%.1fcm range=%.1fcm; Nearby feasible=%d region=%s bone=%s quality=%.1f bladeMiss=%.1fcm range=%.1fcm move=%.1fcm stance=%s"),
 		DecisionId, PlanningAimPoint, Current.bFeasible ? 1 : 0, *Current.Region.ToString(), *Current.Bone.ToString(),
 		Current.Quality, Current.MissCm, Current.StandoffCm, Nearby.bFeasible ? 1 : 0,
 		*Nearby.Region.ToString(), *Nearby.Bone.ToString(), Nearby.Quality, Nearby.MissCm, Nearby.StandoffCm,
@@ -519,8 +519,8 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 	UE_LOG(LogIronboundCombat, Log,
 		TEXT("[AI] CHOICE PlanId=%d Intent=%s Reason=%s region=%s bone=%s quality=%.1f range=%.1fcm tipMiss=%.1fcm move=%.1fcm destination=%s yaw=%.1f"),
 		ActivePlanId, bReposition ? TEXT("RepositionForAttack") : TEXT("AttackFromCurrentPosition"),
-		bReposition ? (!Current.bFeasible ? TEXT("CurrentCannotTipHitNearbyCan")
-			: bRangeImprovement ? TEXT("FartherTipContact") : TEXT("UsefulImprovementWonPolicyRoll"))
+		bReposition ? (!Current.bFeasible ? TEXT("CurrentCannotContactNearbyCan")
+			: bRangeImprovement ? TEXT("FartherBladeContact") : TEXT("UsefulImprovementWonPolicyRoll"))
 			: (bNearbyUseful ? TEXT("CurrentAttackWonPolicyRoll") : TEXT("CurrentAttackGoodRepositionNotWorthCost")),
 		*ActiveOpportunity.Region.ToString(), *ActiveOpportunity.Bone.ToString(),
 		ActiveOpportunity.Quality, ActiveOpportunity.StandoffCm, ActiveOpportunity.MissCm,

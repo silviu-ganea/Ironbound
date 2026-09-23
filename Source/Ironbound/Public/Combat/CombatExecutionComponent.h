@@ -93,6 +93,22 @@ public:
 	UFUNCTION(BlueprintPure, Category="Combat|Attack")
 	FCombatCommittedStrike GetCommittedStrike() const;
 
+	/** Records an actual, time-correlated blade clash so the matching strike may be blocked. */
+	void ConfirmParryInterception(
+		AActor* Attacker,
+		int32 AttackPlanId,
+		FName AttackTechniqueId,
+		FName ParryTechniqueId,
+		float BladeDistanceCm,
+		float CrossingAngleDegrees);
+
+	/** Consumes the most recent confirmed clash only for its originating strike. */
+	bool ConsumeConfirmedParry(
+		AActor* Attacker,
+		int32 AttackPlanId,
+		FName AttackTechniqueId,
+		FName& OutParryTechniqueId);
+
 	/** True while a deliberate execution is positioned but not yet committed. */
 	UFUNCTION(BlueprintPure, Category="Combat|Attack")
 	bool IsAligning() const;
@@ -216,11 +232,18 @@ private:
 	const FCombatExecutionRecord* FindRecord(int32 RecordId) const;
 	const FCombatExecutionRecord* FindPrimaryDeliberateRecord() const;
 	const FCombatExecutionRecord* FindCommittedStrikeRecord() const;
-	void ResolveStrikeContacts();
+	void ResolveStrikeContacts(float DeltaTime);
 	void BroadcastRequirement();
 
 	UPROPERTY()
 	TArray<FCombatExecutionRecord> Executions;
+
+	TWeakObjectPtr<AActor> ConfirmedParryAttacker;
+	int32 ConfirmedParryAttackPlanId = 0;
+	FName ConfirmedParryAttackTechniqueId;
+	FName ConfirmedParryTechniqueId;
+	float ConfirmedParryExpiresAt = 0.f;
+	bool bHasConfirmedParry = false;
 
 	int32 NextRecordId = 1;
 

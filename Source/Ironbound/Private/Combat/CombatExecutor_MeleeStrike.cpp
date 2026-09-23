@@ -7,6 +7,7 @@
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Engine/DataTable.h"
 #include "Engine/World.h"
@@ -129,7 +130,7 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] stance selected: plan=%d region=%s bone=%s score=%.1f miss=%.1f sample=%d time=%.3f"),
+		TEXT("MeleeStrike [%s | %s] stance selected: plan=%d region=%s bone=%s score=%.1f miss=%.1f stance=%s yaw=%.1f sample=%d time=%.3f bladeFraction=%.2f"),
 		*GetNameSafe(GetFighter()),
 		*InRequest.TechniqueId.ToString(),
 		InRequest.PlanId,
@@ -137,9 +138,12 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 		*PlannedTargetBone.ToString(),
 		PlannedTargetScore,
 		CurrentPredictedDistance,
+		*PlannedTransform.GetLocation().ToCompactString(),
+		PlannedTransform.Rotator().Yaw,
 		PlannedContactSampleIndex,
 		PlannedTrajectory.Segments.IsValidIndex(PlannedContactSampleIndex)
-			? PlannedTrajectory.Segments[PlannedContactSampleIndex].TimeSeconds : -1.f);
+			? PlannedTrajectory.Segments[PlannedContactSampleIndex].TimeSeconds : -1.f,
+		PlannedAimPointAlongBlade);
 
 	return true;
 }
@@ -179,11 +183,13 @@ bool UCombatExecutor_MeleeStrike::AdoptPlannedOpportunity(const FCombatAttackOpp
 		Region, Bone, Sample, Score, Opportunity.Region, Opportunity.AimPointAlongBlade,
 		LocalConfig->AimWindowStartFraction, LocalConfig->AimWindowEndFraction,
 		Opportunity.Bone);
-	if (Bone != Opportunity.Bone || Sample == INDEX_NONE || Miss > LocalConfig->ContactToleranceCm)
+	const float OpportunityContactLimit = FMath::Min(
+		LocalConfig->ContactToleranceCm, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm);
+	if (Bone != Opportunity.Bone || Sample == INDEX_NONE || Miss > OpportunityContactLimit)
 	{
 		UE_LOG(LogIronboundCombat, Warning,
-			TEXT("[AI] EXECUTION PlanId=%d AlignmentValid=false region=%s bone=%s miss=%.1f"),
-			GetRequest().PlanId, *Region.ToString(), *Bone.ToString(), Miss);
+			TEXT("[AI] EXECUTION PlanId=%d AlignmentValid=false Reason=OpportunityContactMarginExceeded region=%s bone=%s miss=%.1f limit=%.1f"),
+			GetRequest().PlanId, *Region.ToString(), *Bone.ToString(), Miss, OpportunityContactLimit);
 		return false;
 	}
 	PlannedTransform = Opportunity.Stance;
@@ -288,7 +294,19 @@ bool UCombatExecutor_MeleeStrike::IsReadyToCommit() const
 
 	return FMath::Abs(FacingErrorDegrees) <= LocalConfig->FacingTolerance &&
 		   MeasuredSpeed <= LocalConfig->SettledSpeed &&
-		   CurrentPredictedDistance <= LocalConfig->ContactToleranceCm;
+		   CurrentPredictedDistance <= GetCommitContactToleranceCm();
+}
+
+float UCombatExecutor_MeleeStrike::GetCommitContactToleranceCm() const
+{
+	const UExecConfig_MeleeStrike* LocalConfig = StrikeConfig();
+	if (!LocalConfig)
+	{
+		return 0.f;
+	}
+	return GetRequest().PlanId > 0
+		? FMath::Min(LocalConfig->ContactToleranceCm, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm)
+		: LocalConfig->ContactToleranceCm;
 }
 
 bool UCombatExecutor_MeleeStrike::HasStanceTimedOut(float Now) const
@@ -404,14 +422,14 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 				StrikeConfig()->AimWindowEndFraction, PlannedTargetBone);
 			if (FMath::Abs(FacingErrorDegrees) <= StrikeConfig()->FacingTolerance &&
 				MeasuredSpeed <= StrikeConfig()->SettledSpeed &&
-				CurrentPredictedDistance > StrikeConfig()->ContactToleranceCm)
+				CurrentPredictedDistance > GetCommitContactToleranceCm())
 			{
 				if (InvalidContactStartWorldTime <= 0.f) InvalidContactStartWorldTime = Now;
 				if (Now - InvalidContactStartWorldTime > 0.75f)
 				{
 					UE_LOG(LogIronboundCombat, Warning,
-						TEXT("[AI] EXECUTION PlanId=%d Result=ContactNoLongerValid miss=%.1fcm"),
-						GetRequest().PlanId, CurrentPredictedDistance);
+					TEXT("[AI] EXECUTION PlanId=%d Result=ContactNoLongerValid Reason=OpportunityContactMarginExceeded miss=%.1fcm limit=%.1fcm"),
+					GetRequest().PlanId, CurrentPredictedDistance, GetCommitContactToleranceCm());
 					FinishExecution(TEXT("contact no longer valid"));
 					return;
 				}
@@ -499,6 +517,20 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 
 	CommittedTransform = Fighter->GetActorTransform();
 	MaxCommittedFacingError = FMath::Abs(FacingErrorDegrees);
+	const UCombatEquipmentComponent* Equipment = GetEquipment();
+	const UStaticMeshComponent* Weapon = Equipment ? Equipment->GetWeapon() : nullptr;
+	const FTransform WeaponTransform = Weapon ? Weapon->GetComponentTransform() : FTransform::Identity;
+	const UWeaponDefinition* WeaponDefinition = Equipment ? Equipment->Definition : nullptr;
+	const FVector ActualBladeBase = WeaponDefinition
+		? WeaponTransform.TransformPosition(WeaponDefinition->BladeBase) : FVector::ZeroVector;
+	const FVector ActualBladeTip = WeaponDefinition
+		? WeaponTransform.TransformPosition(WeaponDefinition->BladeTip) : FVector::ZeroVector;
+	const FBladeSegment* PlannedContactSegment = PlannedTrajectory.Segments.IsValidIndex(PlannedContactSampleIndex)
+		? &PlannedTrajectory.Segments[PlannedContactSampleIndex] : nullptr;
+	const FVector PlannedBladeBase = PlannedContactSegment
+		? CommittedTransform.TransformPosition(PlannedContactSegment->Base) : FVector::ZeroVector;
+	const FVector PlannedBladeTip = PlannedContactSegment
+		? CommittedTransform.TransformPosition(PlannedContactSegment->Tip) : FVector::ZeroVector;
 
 	MarkRecordCommitted(PlannedTrajectory, CommittedTransform);
 	Phase = EStrikePhase::Committed;
@@ -523,6 +555,9 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 	const float PlayedLength = AnimInstance->Montage_Play(LocalConfig->Montage);
 	if (PlayedLength <= 0.f)
 	{
+		UE_LOG(LogIronboundCombat, Error,
+			TEXT("[COMBAT] MONTAGE_FAILED PlanId=%d montage=%s playedLength=%.3f"),
+			GetRequest().PlanId, *GetNameSafe(LocalConfig->Montage), PlayedLength);
 		FinishExecution(TEXT("montage failed to start"));
 		return;
 	}
@@ -535,7 +570,7 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] committed: plan=%d region=%s bone=%s score=%.1f miss=%.1f yaw-error=%.1fdeg"),
+		TEXT("MeleeStrike [%s | %s] committed: plan=%d region=%s bone=%s score=%.1f miss=%.1f yaw-error=%.1fdeg sample=%d sampleTime=%.3f bladeFraction=%.2f activeTime=%.3f..%.3f plannedRoot=%s plannedYaw=%.1f committedRoot=%s committedYaw=%.1f plannedBladeBase=%s plannedBladeTip=%s actualWeapon=%s weaponLoc=%s weaponRot=%s actualBladeBase=%s actualBladeTip=%s montage=%s sourceSequence=%s playedLength=%.3f montagePosition=%.3f"),
 		*GetNameSafe(Fighter),
 		*GetRequest().TechniqueId.ToString(),
 		GetRequest().PlanId,
@@ -543,7 +578,20 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 		*PlannedTargetBone.ToString(),
 		PlannedTargetScore,
 		CurrentPredictedDistance,
-		FMath::Abs(FacingErrorDegrees));
+		FMath::Abs(FacingErrorDegrees),
+		PlannedContactSampleIndex,
+		PlannedContactSegment ? PlannedContactSegment->TimeSeconds : -1.f,
+		PlannedAimPointAlongBlade,
+		PlannedTrajectory.ActiveStartTime,
+		PlannedTrajectory.ActiveEndTime,
+		*PlannedTransform.GetLocation().ToCompactString(), PlannedTransform.Rotator().Yaw,
+		*CommittedTransform.GetLocation().ToCompactString(), CommittedTransform.Rotator().Yaw,
+		*PlannedBladeBase.ToCompactString(), *PlannedBladeTip.ToCompactString(),
+		*GetNameSafe(Weapon), *WeaponTransform.GetLocation().ToCompactString(),
+		*WeaponTransform.Rotator().ToCompactString(), *ActualBladeBase.ToCompactString(),
+		*ActualBladeTip.ToCompactString(), *GetNameSafe(LocalConfig->Montage),
+		*GetNameSafe(LocalConfig->SourceSequence), PlayedLength,
+		AnimInstance->Montage_GetPosition(LocalConfig->Montage));
 }
 
 void UCombatExecutor_MeleeStrike::HandleMontageEnded(

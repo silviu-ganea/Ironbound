@@ -324,6 +324,7 @@ bool UCombatThreatComponent::BuildThreatFromCommittedStrike(
 		// still an objective threat state.
 		OutThreat.Attacker = Attacker;
 		OutThreat.TechniqueId = Strike.TechniqueId;
+		OutThreat.AttackerPlanId = Strike.PlanId;
 		OutThreat.SourceTrajectory = Strike.Trajectory;
 		OutThreat.AttackerTransform = Strike.Transform;
 		OutThreat.CurrentSourceTime = CurrentSourceTime;
@@ -403,6 +404,7 @@ bool UCombatThreatComponent::BuildThreatFromCommittedStrike(
 	OutThreat.Attacker = Attacker;
 	OutThreat.Weapon = GetAttackerWeapon(Attacker);
 	OutThreat.TechniqueId = Strike.TechniqueId;
+	OutThreat.AttackerPlanId = Strike.PlanId;
 	OutThreat.SourceTrajectory = Strike.Trajectory;
 	OutThreat.AttackerTransform = Strike.Transform;
 	OutThreat.CurrentSourceTime = CurrentSourceTime;

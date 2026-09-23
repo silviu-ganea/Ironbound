@@ -50,6 +50,7 @@ private:
 	bool AdoptPlannedOpportunity(const FCombatAttackOpportunity& Opportunity);
 	bool IsAtStancePosition() const;
 	bool IsReadyToCommit() const;
+	float GetCommitContactToleranceCm() const;
 	bool HasStanceTimedOut(float Now) const;
 
 	void UpdateMeasuredSpeed(float DeltaTime);
