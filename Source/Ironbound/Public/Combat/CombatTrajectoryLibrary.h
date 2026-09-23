@@ -117,7 +117,7 @@ struct IRONBOUND_API FCombatAttackOpportunity
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float MovementCostCm = 0.f;
 	/** Root-to-target horizontal distance at this stance. */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float StandoffCm = 0.f;
-	/** Requested blade fraction; negative values select the distal 10%. */
+	/** Requested blade fraction; negative values track the moving sword tip. */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float AimPointAlongBlade = -1.f;
 	/** Actual blade fraction at the selected contact sample. */
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float ContactFraction = -1.f;
@@ -135,10 +135,8 @@ class IRONBOUND_API UCombatTrajectoryLibrary : public UBlueprintFunctionLibrary
 	GENERATED_BODY()
 
 public:
-	/** Maximum miss accepted when an AI commits a previously selected opportunity. */
+	/** Maximum outward miss considered while evaluating a planned opportunity. */
 	static constexpr float MaxOpportunityContactMissCm = 12.f;
-	/** Negative aim fractions evaluate contact only along the blade's distal 10%. */
-	static constexpr float OuterBladeContactStartFraction = 0.9f;
 	/** Default minimum penetration into the target volume for a planned hit. */
 	static constexpr float DefaultContactPenetrationMarginCm = 2.f;
 
@@ -159,6 +157,19 @@ public:
 		float TargetRadiusCm,
 		float AimPointAlongBlade,
 		float& OutContactFraction);
+	/** Measure the animated path of one blade point, interpolating between samples. */
+	static float EvaluateTrajectoryContactMiss(
+		const FBladeTrajectory& Trajectory, const FTransform& RootTransform,
+		const FVector& TargetLocation, float TargetRadiusCm,
+		float AimPointAlongBlade, float AimWindowStartFraction,
+		float AimWindowEndFraction, int32& OutSample,
+		float& OutContactFraction);
+	/** Position the root so a sampled blade-point motion crosses a target center. */
+	static bool PlaceTrajectoryContactAtTarget(
+		const FBladeSegment& First, const FBladeSegment& Last,
+		const FVector& TargetLocation, float RootHeight,
+		const FVector& RootScale, float YawDegrees,
+		float AimPointAlongBlade, FTransform& OutStance);
 	/** Select one preferred stance from candidates belonging to one region. */
 	static int32 SelectPreferredAttackOpportunityIndex(
 		const TArray<FCombatAttackOpportunity>& Candidates,

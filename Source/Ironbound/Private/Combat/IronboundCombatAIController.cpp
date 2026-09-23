@@ -516,9 +516,8 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 	}
 	const FName RequiredRegion = PreferredAttackTargetRegion.IsNone()
 		? Config->DefaultTargetRegion : PreferredAttackTargetRegion;
-	// Planning follows the technique's authored contact policy: -1 means an
-	// ordinary cut may contact anywhere along the useful blade, while a thrust
-	// can explicitly request the tip.
+	// Planning follows the technique's authored contact policy: -1 tracks
+	// the sword tip through the sampled swing.
 	const float PlanningAimPoint = Config->AimPointAlongBlade;
 	TArray<FCombatAttackOpportunity> Opportunities;
 	UCombatTrajectoryLibrary::FindAttackOpportunities(AttackerMesh, TargetMesh, Trajectory,

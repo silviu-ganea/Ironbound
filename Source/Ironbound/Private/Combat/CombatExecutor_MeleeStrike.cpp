@@ -130,7 +130,7 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] stance selected: plan=%d region=%s bone=%s score=%.1f miss=%.1f stance=%s yaw=%.1f sample=%d time=%.3f bladeFraction=%.2f"),
+		TEXT("MeleeStrike [%s | %s] stance selected: plan=%d region=%s bone=%s score=%.1f miss=%.1f stance=%s yaw=%.1f sample=%d time=%.3f aimRequest=%.2f"),
 		*GetNameSafe(GetFighter()),
 		*InRequest.TechniqueId.ToString(),
 		InRequest.PlanId,
@@ -168,13 +168,6 @@ bool UCombatExecutor_MeleeStrike::AdoptPlannedOpportunity(const FCombatAttackOpp
 	{
 		return false;
 	}
-	const FVector Toward = (Target->GetActorLocation() - Opportunity.Stance.GetLocation()).GetSafeNormal2D();
-	if (Toward.IsNearlyZero() ||
-		FMath::Abs(FMath::FindDeltaAngleDegrees(Toward.Rotation().Yaw,
-			Opportunity.Stance.Rotator().Yaw)) > LocalConfig->MaxFacingDeviationFromTargetDegrees + 0.01f)
-	{
-		return false;
-	}
 	FName Region, Bone;
 	int32 Sample = INDEX_NONE;
 	float Score = 0.f;
@@ -185,7 +178,10 @@ bool UCombatExecutor_MeleeStrike::AdoptPlannedOpportunity(const FCombatAttackOpp
 		Opportunity.Bone);
 	const float OpportunityContactLimit = FMath::Min(
 		LocalConfig->ContactToleranceCm, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm);
-	if (Bone != Opportunity.Bone || Sample == INDEX_NONE || Miss > OpportunityContactLimit)
+	if (Bone != Opportunity.Bone || Sample == INDEX_NONE ||
+		!UCombatTrajectoryLibrary::IsContactFeasible(
+			Miss, OpportunityContactLimit,
+			UCombatTrajectoryLibrary::DefaultContactPenetrationMarginCm))
 	{
 		UE_LOG(LogIronboundCombat, Warning,
 			TEXT("[AI] EXECUTION PlanId=%d AlignmentValid=false Reason=OpportunityContactMarginExceeded region=%s bone=%s miss=%.1f limit=%.1f"),
@@ -309,13 +305,9 @@ float UCombatExecutor_MeleeStrike::GetCommitContactToleranceCm() const
 		return LocalConfig->ContactToleranceCm;
 	}
 
-	// The opportunity must start as a tight match when it is selected. Once
-	// navigation and stance alignment finish, an animated target's hand may
-	// have moved. Permit that bounded pose drift here; the actual weapon sweep
-	// remains the authority for hit and damage.
-	return FMath::Max(
-		FMath::Min(LocalConfig->ContactToleranceCm, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm),
-		LocalConfig->MaxCommitTargetPoseDriftCm);
+	// Recheck the same penetration required during planning. A positive miss
+	// cannot become a credible hit simply because the target changed pose.
+	return -UCombatTrajectoryLibrary::DefaultContactPenetrationMarginCm;
 }
 
 bool UCombatExecutor_MeleeStrike::HasStanceTimedOut(float Now) const
@@ -540,6 +532,24 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 		? CommittedTransform.TransformPosition(PlannedContactSegment->Base) : FVector::ZeroVector;
 	const FVector PlannedBladeTip = PlannedContactSegment
 		? CommittedTransform.TransformPosition(PlannedContactSegment->Tip) : FVector::ZeroVector;
+	FName CommittedRegion, CommittedBone;
+	int32 CommittedSample = INDEX_NONE;
+	float CommittedScore = 0.f;
+	float CommittedFraction = -1.f;
+	const AActor* Target = PlannedTarget.Get();
+	USkeletalMeshComponent* TargetMesh = Target
+		? Target->FindComponentByClass<USkeletalMeshComponent>() : nullptr;
+	if (TargetMesh)
+	{
+		CurrentPredictedDistance = UCombatTrajectoryLibrary::EvaluateScoredContact(
+			PlannedTrajectory, CommittedTransform,
+			TargetMesh,
+			LocalConfig->CombatTargets, CommittedRegion, CommittedBone,
+			CommittedSample, CommittedScore, PlannedTargetRegion,
+			PlannedAimPointAlongBlade, LocalConfig->AimWindowStartFraction,
+			LocalConfig->AimWindowEndFraction, PlannedTargetBone, false,
+			&CommittedFraction);
+	}
 
 	MarkRecordCommitted(PlannedTrajectory, CommittedTransform);
 	Phase = EStrikePhase::Committed;
@@ -579,7 +589,7 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] committed: plan=%d region=%s bone=%s score=%.1f miss=%.1f yaw-error=%.1fdeg sample=%d sampleTime=%.3f bladeFraction=%.2f activeTime=%.3f..%.3f plannedRoot=%s plannedYaw=%.1f committedRoot=%s committedYaw=%.1f plannedBladeBase=%s plannedBladeTip=%s actualWeapon=%s weaponLoc=%s weaponRot=%s actualBladeBase=%s actualBladeTip=%s montage=%s sourceSequence=%s playedLength=%.3f montagePosition=%.3f"),
+		TEXT("MeleeStrike [%s | %s] committed: plan=%d region=%s bone=%s score=%.1f miss=%.1f yaw-error=%.1fdeg sample=%d sampleTime=%.3f aimRequest=%.2f contactSample=%d contactFraction=%.2f activeTime=%.3f..%.3f plannedRoot=%s plannedYaw=%.1f committedRoot=%s committedYaw=%.1f plannedBladeBase=%s plannedBladeTip=%s actualWeapon=%s weaponLoc=%s weaponRot=%s actualBladeBase=%s actualBladeTip=%s montage=%s sourceSequence=%s playedLength=%.3f montagePosition=%.3f"),
 		*GetNameSafe(Fighter),
 		*GetRequest().TechniqueId.ToString(),
 		GetRequest().PlanId,
@@ -591,6 +601,7 @@ void UCombatExecutor_MeleeStrike::CommitStrike()
 		PlannedContactSampleIndex,
 		PlannedContactSegment ? PlannedContactSegment->TimeSeconds : -1.f,
 		PlannedAimPointAlongBlade,
+		CommittedSample, CommittedFraction,
 		PlannedTrajectory.ActiveStartTime,
 		PlannedTrajectory.ActiveEndTime,
 		*PlannedTransform.GetLocation().ToCompactString(), PlannedTransform.Rotator().Yaw,

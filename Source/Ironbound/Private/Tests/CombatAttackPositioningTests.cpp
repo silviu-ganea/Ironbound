@@ -1,188 +1,152 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Combat/CombatTrajectoryLibrary.h"
-
 #include "Misc/AutomationTest.h"
 
 namespace
 {
-	static FBladeSegment MakeTestBlade()
+	static FBladeTrajectory MakeTrajectory(float BaseReach, float TipReach)
 	{
-		FBladeSegment Blade;
-		Blade.Base = FVector::ZeroVector;
-		Blade.Tip = FVector(100.f, 0.f, 0.f);
-		return Blade;
+		FBladeTrajectory Trajectory;
+		Trajectory.bValid = true;
+		FBladeSegment Before;
+		Before.Base = FVector(BaseReach, -30.f, 0.f);
+		Before.Tip = FVector(TipReach, -30.f, 0.f);
+		Trajectory.Segments.Add(Before);
+		FBladeSegment Contact;
+		Contact.Base = FVector(BaseReach, 30.f, 0.f);
+		Contact.Tip = FVector(TipReach, 30.f, 0.f);
+		Trajectory.Segments.Add(Contact);
+		Trajectory.ReachMax = TipReach;
+		return Trajectory;
 	}
 
-	static FCombatAttackOpportunity MakeOpportunity(
-		float StandoffCm,
-		int32 ContactSample,
-		float TargetRadiusCm)
+	static FCombatAttackOpportunity EvaluateStance(
+		const FBladeTrajectory& Trajectory, float Standoff, float TargetRadius)
 	{
 		FCombatAttackOpportunity Opportunity;
 		Opportunity.TechniqueId = TEXT("TestCut");
 		Opportunity.Region = TEXT("Torso");
+		Opportunity.StandoffCm = Standoff;
 		Opportunity.Stance = FTransform(
-			FRotator::ZeroRotator,
-			FVector(-StandoffCm, 0.f, 0.f),
+			FRotator::ZeroRotator, FVector(-Standoff, 0.f, 0.f),
 			FVector::OneVector);
-		Opportunity.StandoffCm = StandoffCm;
-		Opportunity.ContactSample = ContactSample;
-		Opportunity.AimPointAlongBlade = -1.f;
-		Opportunity.MissCm = UCombatTrajectoryLibrary::EvaluateBladeContactMiss(
-			MakeTestBlade(), Opportunity.Stance, FVector::ZeroVector,
-			TargetRadiusCm, Opportunity.AimPointAlongBlade,
+		Opportunity.MissCm = UCombatTrajectoryLibrary::EvaluateTrajectoryContactMiss(
+			Trajectory, Opportunity.Stance, FVector::ZeroVector, TargetRadius,
+			-1.f, 0.f, 1.f, Opportunity.ContactSample,
 			Opportunity.ContactFraction);
-		Opportunity.bFeasible = ContactSample != INDEX_NONE &&
+		Opportunity.bFeasible = Opportunity.ContactSample != INDEX_NONE &&
 			UCombatTrajectoryLibrary::IsContactFeasible(
 				Opportunity.MissCm,
-				UCombatTrajectoryLibrary::MaxOpportunityContactMissCm,
-				UCombatTrajectoryLibrary::DefaultContactPenetrationMarginCm);
+				UCombatTrajectoryLibrary::MaxOpportunityContactMissCm);
 		return Opportunity;
-	}
-
-	static FString DescribeSelection(
-		const TArray<FCombatAttackOpportunity>& Candidates,
-		int32 SelectedIndex,
-		const FString& Reason)
-	{
-		if (!Candidates.IsValidIndex(SelectedIndex))
-		{
-			return FString::Printf(
-				TEXT("Production preferred-stance result: no candidate selected. Reason: %s"),
-				*Reason);
-		}
-
-		const FCombatAttackOpportunity& Selected = Candidates[SelectedIndex];
-		return FString::Printf(
-			TEXT("Production preferred-stance result: region=%s standoff=%.1f cm "
-				"contactSample=%d bladeFraction=%.3f signedMiss=%.1f cm feasible=%s "
-				"reason=%s"),
-			*Selected.Region.ToString(), Selected.StandoffCm,
-			Selected.ContactSample, Selected.ContactFraction, Selected.MissCm,
-			Selected.bFeasible ? TEXT("true") : TEXT("false"), *Reason);
 	}
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCombatAttackFartherValidStanceTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCombatAttackFartherValidStanceTest,
 	"Ironbound.Combat.AttackPositioning.FarthestValidDistalContact",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
 bool FCombatAttackFartherValidStanceTest::RunTest(const FString& Parameters)
 {
 	TArray<FCombatAttackOpportunity> Candidates;
-	Candidates.Add(MakeOpportunity(90.f, 4, 10.f));
-	Candidates.Add(MakeOpportunity(100.f, 7, 10.f));
-	Candidates[0].MovementCostCm = 10.f;
-	Candidates[1].MovementCostCm = 35.f;
+	const FBladeTrajectory Short = MakeTrajectory(40.f, 140.f);
+	Candidates.Add(EvaluateStance(Short, 110.f, 10.f));
+	Candidates.Add(EvaluateStance(Short, 140.f, 10.f));
+	Candidates.Add(EvaluateStance(Short, 150.f, 10.f));
+	TestTrue(TEXT("Sampled contact selects the farthest penetrating stance"),
+		UCombatTrajectoryLibrary::SelectPreferredAttackOpportunityIndex(Candidates) == 1 &&
+		Candidates[1].ContactSample == 0 && Candidates[1].bFeasible &&
+		!Candidates[2].bFeasible);
+	TestTrue(TEXT("Contact occurs between animation samples, where neither sampled tip touches"),
+		Candidates[1].ContactFraction == 1.f &&
+		FVector::Distance(Short.Segments[0].Tip, FVector(140.f, 0.f, 0.f)) > 10.f &&
+		FVector::Distance(Short.Segments[1].Tip, FVector(140.f, 0.f, 0.f)) > 10.f);
+	const FCombatAttackOpportunity CenteredHead = EvaluateStance(Short, 140.f, 7.f);
+	const FCombatAttackOpportunity GlancingHead = EvaluateStance(Short, 132.f, 7.f);
+	TestTrue(TEXT("The tip path must pass through the central head volume"),
+		CenteredHead.bFeasible && !GlancingHead.bFeasible);
 
-	FString Reason;
-	const int32 SelectedIndex =
-		UCombatTrajectoryLibrary::SelectPreferredAttackOpportunityIndex(
-			Candidates, &Reason);
-	AddInfo(DescribeSelection(Candidates, SelectedIndex, Reason));
-
-	TestTrue(TEXT("Both stances have distal-blade penetration contact"),
-		Candidates[0].bFeasible && Candidates[1].bFeasible);
-	TestTrue(FString::Printf(
-		TEXT("Prefer the farther valid stance at %.1f cm over %.1f cm; selected index=%d (%s)."),
-		Candidates[1].StandoffCm, Candidates[0].StandoffCm,
-		SelectedIndex, *Reason),
-		SelectedIndex == 1);
-	if (Candidates.IsValidIndex(SelectedIndex))
-	{
-		TestTrue(TEXT("Selected contact is on the distal 10 percent of the blade"),
-			Candidates[SelectedIndex].ContactFraction >=
-				UCombatTrajectoryLibrary::OuterBladeContactStartFraction);
-		TestTrue(TEXT("Selected signed miss meets the penetration margin"),
-			Candidates[SelectedIndex].MissCm <=
-				-UCombatTrajectoryLibrary::DefaultContactPenetrationMarginCm);
-	}
+	Candidates.Reset();
+	const FBladeTrajectory Long = MakeTrajectory(60.f, 180.f);
+	Candidates.Add(EvaluateStance(Long, 140.f, 10.f));
+	Candidates.Add(EvaluateStance(Long, 180.f, 10.f));
+	Candidates.Add(EvaluateStance(Long, 190.f, 10.f));
+	TestTrue(TEXT("A different sampled arm and blade reach changes the valid standoff"),
+		UCombatTrajectoryLibrary::SelectPreferredAttackOpportunityIndex(Candidates) == 1 &&
+		Candidates[1].bFeasible && !Candidates[2].bFeasible);
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCombatAttackFartherOutsideVolumeTest,
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCombatAttackFartherOutsideVolumeTest,
 	"Ironbound.Combat.AttackPositioning.RejectFartherOutsideTargetVolume",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
 bool FCombatAttackFartherOutsideVolumeTest::RunTest(const FString& Parameters)
 {
-	TArray<FCombatAttackOpportunity> Candidates;
-	Candidates.Add(MakeOpportunity(100.f, 3, 10.f));
-	Candidates.Add(MakeOpportunity(111.f, 8, 10.f));
-
-	FString Reason;
-	const int32 SelectedIndex =
-		UCombatTrajectoryLibrary::SelectPreferredAttackOpportunityIndex(
-			Candidates, &Reason);
-	AddInfo(DescribeSelection(Candidates, SelectedIndex, Reason));
-
-	TestTrue(FString::Printf(
-		TEXT("Farther candidate miss=%.1f cm must fail the penetration margin."),
-		Candidates[1].MissCm),
-		Candidates[1].MissCm > 0.f && !Candidates[1].bFeasible);
-	TestTrue(TEXT("The closer comparison stance remains feasible"),
-		Candidates[0].bFeasible);
-	TestTrue(FString::Printf(
-		TEXT("Select the closer valid stance at %.1f cm, not the outside-volume stance at %.1f cm; selected index=%d (%s)."),
-		Candidates[0].StandoffCm, Candidates[1].StandoffCm,
-		SelectedIndex, *Reason),
-		SelectedIndex == 0);
+	const FBladeTrajectory Trajectory = MakeTrajectory(40.f, 140.f);
+	const FCombatAttackOpportunity Contact = EvaluateStance(Trajectory, 140.f, 10.f);
+	const FCombatAttackOpportunity Outside = EvaluateStance(Trajectory, 150.f, 10.f);
+	TestTrue(TEXT("The target-volume boundary lacks the required penetration"),
+		Contact.bFeasible && !Outside.bFeasible && Outside.MissCm >= 0.f);
 	return true;
 }
 
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FCombatAttackInnerBladeOnlyTest,
-	"Ironbound.Combat.AttackPositioning.RejectInnerBladeOnlyContact",
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCombatAttackInnerBladeOnlyTest,
+	"Ironbound.Combat.AttackPositioning.RejectBladeIntersectionWithoutTipPath",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
 bool FCombatAttackInnerBladeOnlyTest::RunTest(const FString& Parameters)
 {
-	FCombatAttackOpportunity InnerOnly = MakeOpportunity(80.f, 2, 4.f);
-	float InnerFraction = -1.f;
-	const float InnerFractionMiss = UCombatTrajectoryLibrary::EvaluateBladeContactMiss(
-		MakeTestBlade(), InnerOnly.Stance, FVector::ZeroVector, 4.f,
-		0.8f, InnerFraction);
-
-	TArray<FCombatAttackOpportunity> Candidates;
-	Candidates.Add(InnerOnly);
-	Candidates.Add(MakeOpportunity(100.f, 9, 4.f));
-
-	FString Reason;
-	const int32 SelectedIndex =
-		UCombatTrajectoryLibrary::SelectPreferredAttackOpportunityIndex(
-			Candidates, &Reason);
-	AddInfo(FString::Printf(
-		TEXT("Inner-only candidate: region=%s standoff=%.1f cm sample=%d "
-			"outerBladeFraction=%.3f signedMiss=%.1f cm; explicit inner fraction=%.3f "
-			"signedMiss=%.1f cm feasibleAtInnerFraction=%s."),
-		*InnerOnly.Region.ToString(), InnerOnly.StandoffCm,
-		InnerOnly.ContactSample, InnerOnly.ContactFraction, InnerOnly.MissCm,
-		InnerFraction, InnerFractionMiss,
+	FBladeTrajectory Trajectory = MakeTrajectory(40.f, 140.f);
+	for (FBladeSegment& Segment : Trajectory.Segments)
+	{
+		Segment.Base.Y = 0.f;
+		Segment.Tip.Y = 0.f;
+	}
+	const FCombatAttackOpportunity Inner = EvaluateStance(Trajectory, 90.f, 4.f);
+	float BladeFraction = -1.f;
+	const float BladeMiss = UCombatTrajectoryLibrary::EvaluateBladeContactMiss(
+		Trajectory.Segments[1], Inner.Stance, FVector::ZeroVector, 4.f,
+		-1.f, BladeFraction);
+	TestTrue(TEXT("A blade intersection must not count when the animated tip path misses"),
+		!Inner.bFeasible && Inner.ContactFraction == 1.f &&
 		UCombatTrajectoryLibrary::IsContactFeasible(
-			InnerFractionMiss,
-			UCombatTrajectoryLibrary::MaxOpportunityContactMissCm,
-			UCombatTrajectoryLibrary::DefaultContactPenetrationMarginCm)
-			? TEXT("true") : TEXT("false")));
-	AddInfo(DescribeSelection(Candidates, SelectedIndex, Reason));
+			BladeMiss, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm) &&
+		FMath::IsNearlyEqual(BladeFraction, 0.5f));
+	return true;
+}
 
-	TestTrue(TEXT("The inner point would penetrate the target volume"),
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCombatAttackSideSwingCenterTest,
+	"Ironbound.Combat.AttackPositioning.SideSwingTipCrossesTargetCenter",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FCombatAttackSideSwingCenterTest::RunTest(const FString& Parameters)
+{
+	FBladeTrajectory Trajectory;
+	Trajectory.bValid = true;
+	FBladeSegment First;
+	First.Base = FVector(0.f, 20.f, 20.f);
+	First.Tip = FVector(0.f, 100.f, 20.f);
+	Trajectory.Segments.Add(First);
+	FBladeSegment Last;
+	Last.Base = FVector(0.f, 20.f, -20.f);
+	Last.Tip = FVector(0.f, 100.f, -20.f);
+	Trajectory.Segments.Add(Last);
+	const FVector Target(0.f, 100.f, 0.f);
+	FTransform Stance;
+	const bool bCentered = UCombatTrajectoryLibrary::PlaceTrajectoryContactAtTarget(
+		First, Last, Target, 0.f, FVector::OneVector, 0.f, -1.f, Stance);
+	int32 Sample = INDEX_NONE;
+	float Fraction = -1.f;
+	const float Miss = UCombatTrajectoryLibrary::EvaluateTrajectoryContactMiss(
+		Trajectory, Stance, Target, 7.f, -1.f, 0.f, 1.f,
+		Sample, Fraction);
+	TestTrue(TEXT("A tip arc can cross the target center even when the actor faces 90 degrees away"),
+		bCentered && FMath::IsNearlyEqual(Stance.GetLocation().Size2D(), 0.f) &&
+		FMath::IsNearlyEqual(Stance.Rotator().Yaw, 0.f) &&
+		FMath::Abs(FMath::FindDeltaAngleDegrees(
+			(Target - Stance.GetLocation()).Rotation().Yaw,
+			Stance.Rotator().Yaw)) > 45.f &&
+		Sample == 0 && Fraction == 1.f &&
 		UCombatTrajectoryLibrary::IsContactFeasible(
-			InnerFractionMiss,
-			UCombatTrajectoryLibrary::MaxOpportunityContactMissCm,
-			UCombatTrajectoryLibrary::DefaultContactPenetrationMarginCm));
-	TestTrue(TEXT("Explicit blade-fraction contact remains at the requested fraction"),
-		FMath::IsNearlyEqual(InnerFraction, 0.8f));
-	TestTrue(FString::Printf(
-		TEXT("The outer-blade evaluation must reject inner-only contact (fraction=%.3f, miss=%.1f cm)."),
-		InnerOnly.ContactFraction, InnerOnly.MissCm),
-		!InnerOnly.bFeasible);
-	TestTrue(FString::Printf(
-		TEXT("Select the valid distal-contact stance at %.1f cm; selected index=%d (%s)."),
-		Candidates[1].StandoffCm, SelectedIndex, *Reason),
-		SelectedIndex == 1 && Candidates[1].bFeasible);
+			Miss, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm));
 	return true;
 }
 

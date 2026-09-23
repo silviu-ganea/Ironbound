@@ -50,7 +50,7 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting")
 	FName DefaultTargetRegion;
 
-	/** -1 = any blade point (cuts); 0..1 = a required blade fraction (e.g. tip thrust). */
+	/** -1 = moving sword tip (cuts); 0..1 = a specified blade point. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting", meta=(ClampMin="-1.0", ClampMax="1.0"))
 	float AimPointAlongBlade = -1.f;
 
@@ -85,10 +85,6 @@ public:
 	/** Tolerance used by the prototype target-contact solver, cm. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.1"))
 	float ContactToleranceCm = 25.f;
-
-	/** Maximum target-bone pose drift accepted after moving into a previously valid attack stance, cm. Actual weapon collision still decides whether the strike hits. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.1"))
-	float MaxCommitTargetPoseDriftCm = 50.f;
 
 	/** Safety deadline added after the sampled strike interval, seconds. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.0"))

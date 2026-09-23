@@ -802,11 +802,11 @@ float UCombatTrajectoryLibrary::EvaluateBladeContactMiss(
 	float AimPointAlongBlade,
 	float& OutContactFraction)
 {
-	const bool bUseOuterBlade = AimPointAlongBlade < 0.f;
-	const float FirstFraction = bUseOuterBlade
-		? UCombatTrajectoryLibrary::OuterBladeContactStartFraction
+	const bool bUseWholeBlade = AimPointAlongBlade < 0.f;
+	const float FirstFraction = bUseWholeBlade
+		? 0.f
 		: FMath::Clamp(AimPointAlongBlade, 0.f, 1.f);
-	const float LastFraction = bUseOuterBlade ? 1.f : FirstFraction;
+	const float LastFraction = bUseWholeBlade ? 1.f : FirstFraction;
 	const FVector BladeBase = RootTransform.TransformPosition(Segment.Base);
 	const FVector BladeTip = RootTransform.TransformPosition(Segment.Tip);
 	const FVector ContactStart = FMath::Lerp(BladeBase, BladeTip, FirstFraction);
@@ -827,6 +827,89 @@ float UCombatTrajectoryLibrary::EvaluateBladeContactMiss(
 		FirstFraction, LastFraction, LocalContactFraction);
 	return FVector::Distance(TargetLocation, ClosestContact) -
 		FMath::Max(0.f, TargetRadiusCm);
+}
+
+
+float UCombatTrajectoryLibrary::EvaluateTrajectoryContactMiss(
+	const FBladeTrajectory& Trajectory, const FTransform& RootTransform,
+	const FVector& TargetLocation, float TargetRadiusCm,
+	float AimPointAlongBlade, float AimWindowStartFraction,
+	float AimWindowEndFraction, int32& OutSample,
+	float& OutContactFraction)
+{
+	OutSample = INDEX_NONE;
+	OutContactFraction = -1.f;
+	if (!Trajectory.bValid || Trajectory.Segments.IsEmpty())
+	{
+		return TNumericLimits<float>::Max();
+	}
+	const float FirstFraction = FMath::Clamp(
+		FMath::Min(AimWindowStartFraction, AimWindowEndFraction), 0.f, 1.f);
+	const float LastFraction = FMath::Clamp(
+		FMath::Max(AimWindowStartFraction, AimWindowEndFraction), 0.f, 1.f);
+	const int32 FirstSample = FMath::Clamp(
+		FMath::CeilToInt(FirstFraction * float(Trajectory.Segments.Num() - 1)),
+		0, Trajectory.Segments.Num() - 1);
+	const int32 LastSample = FMath::Clamp(
+		FMath::FloorToInt(LastFraction * float(Trajectory.Segments.Num() - 1)),
+		FirstSample, Trajectory.Segments.Num() - 1);
+	float BestMiss = TNumericLimits<float>::Max();
+	const float BladeFraction = AimPointAlongBlade < 0.f
+		? 1.f : FMath::Clamp(AimPointAlongBlade, 0.f, 1.f);
+	auto ContactPoint = [&](int32 Index)
+	{
+		const FBladeSegment& Segment = Trajectory.Segments[Index];
+		return RootTransform.TransformPosition(
+			FMath::Lerp(Segment.Base, Segment.Tip, BladeFraction));
+	};
+	for (int32 Index = FirstSample; Index <= LastSample; ++Index)
+	{
+		const FVector Start = ContactPoint(Index);
+		const FVector End = Index < LastSample ? ContactPoint(Index + 1) : Start;
+		const float Miss = FVector::Distance(TargetLocation,
+			FMath::ClosestPointOnSegment(TargetLocation, Start, End)) -
+			FMath::Max(0.f, TargetRadiusCm);
+		if (Miss < BestMiss)
+		{
+			BestMiss = Miss;
+			OutSample = Index;
+			OutContactFraction = BladeFraction;
+		}
+	}
+	return BestMiss;
+}
+
+
+bool UCombatTrajectoryLibrary::PlaceTrajectoryContactAtTarget(
+	const FBladeSegment& First, const FBladeSegment& Last,
+	const FVector& TargetLocation, float RootHeight,
+	const FVector& RootScale, float YawDegrees,
+	float AimPointAlongBlade, FTransform& OutStance)
+{
+	const float BladeFraction = AimPointAlongBlade < 0.f
+		? 1.f : FMath::Clamp(AimPointAlongBlade, 0.f, 1.f);
+	const FVector FirstPoint = FMath::Lerp(First.Base, First.Tip, BladeFraction) * RootScale;
+	const FVector LastPoint = FMath::Lerp(Last.Base, Last.Tip, BladeFraction) * RootScale;
+	const float HeightDelta = LastPoint.Z - FirstPoint.Z;
+	const float TargetHeight = TargetLocation.Z - RootHeight;
+	if (FMath::IsNearlyZero(HeightDelta) &&
+		!FMath::IsNearlyEqual(TargetHeight, FirstPoint.Z, 0.1f))
+	{
+		return false;
+	}
+	const float TimeFraction = FMath::IsNearlyZero(HeightDelta)
+		? 0.5f : (TargetHeight - FirstPoint.Z) / HeightDelta;
+	if (TimeFraction < 0.f || TimeFraction > 1.f)
+	{
+		return false;
+	}
+	const FVector ContactPoint = FMath::Lerp(FirstPoint, LastPoint, TimeFraction);
+	const FRotator Yaw(0.f, YawDegrees, 0.f);
+	const FVector Offset = Yaw.RotateVector(ContactPoint);
+	OutStance = FTransform(Yaw,
+		FVector(TargetLocation.X - Offset.X, TargetLocation.Y - Offset.Y,
+			RootHeight), RootScale);
+	return true;
 }
 
 
@@ -946,7 +1029,8 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 	float ContactPenetrationMarginCm)
 {
 	OutOpportunities.Reset();
-	if (!AttackerMesh || !VictimMesh || !CombatTargets || !Trajectory.bValid)
+	if (!AttackerMesh || !VictimMesh || !CombatTargets ||
+		!Trajectory.bValid || Trajectory.Segments.IsEmpty())
 	{
 		return;
 	}
@@ -1069,9 +1153,7 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 
 	auto Evaluate = [&](const FVector& Location, float Yaw, bool bCurrent)
 	{
-		const FVector Toward = (Target - Location).GetSafeNormal2D();
-		if (Toward.IsNearlyZero() ||
-			FMath::Abs(FMath::FindDeltaAngleDegrees(Toward.Rotation().Yaw, Yaw)) > FacingLimit + 0.01f)
+		if ((Target - Location).IsNearlyZero())
 		{
 			return;
 		}
@@ -1081,7 +1163,7 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 			return;
 		}
 		const float Standoff = FVector::Dist2D(Location, Target);
-		if (bCurrent && Standoff < MinimumDistance)
+		if (Standoff < MinimumDistance)
 		{
 			return;
 		}
@@ -1143,6 +1225,48 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 	for (int32 Y = -8; Y <= 8; ++Y)
 	{
 		Evaluate(Origin, CurrentFacing + FacingLimit * float(Y) / 8.f, true);
+	}
+
+	// Place the sampled tip path through each target bone at its actual height.
+	// These candidates give the stance search a center hit even when a distance
+	// or angle grid would step over the narrow path.
+	const int32 FirstAimSample = FMath::Clamp(FMath::CeilToInt(
+		FMath::Clamp(FMath::Min(AimWindowStartFraction, AimWindowEndFraction),
+			0.f, 1.f) * float(Trajectory.Segments.Num() - 1)),
+		0, Trajectory.Segments.Num() - 1);
+	const int32 LastAimSample = FMath::Clamp(FMath::FloorToInt(
+		FMath::Clamp(FMath::Max(AimWindowStartFraction, AimWindowEndFraction),
+			0.f, 1.f) * float(Trajectory.Segments.Num() - 1)),
+		FirstAimSample, Trajectory.Segments.Num() - 1);
+	const FVector ActorScale = Attacker->GetActorScale3D();
+	for (const TPair<FName, uint8*>& Pair : CombatTargets->GetRowMap())
+	{
+		if (!RequiredRegion.IsNone() && Pair.Key != RequiredRegion)
+		{
+			continue;
+		}
+		const FCombatTargetRow* Row = reinterpret_cast<const FCombatTargetRow*>(Pair.Value);
+		if (!Row) continue;
+		for (const FName Bone : Row->Bones)
+		{
+			if (!VictimMesh->DoesSocketExist(Bone)) continue;
+			const FVector BoneLocation = VictimMesh->GetSocketLocation(Bone);
+			for (int32 Index = FirstAimSample; Index < LastAimSample; ++Index)
+			{
+				for (int32 YawStep = 0; YawStep < 36; ++YawStep)
+				{
+					const float Yaw = CurrentFacing + float(YawStep) * 10.f;
+					FTransform CenteredStance;
+					if (PlaceTrajectoryContactAtTarget(
+						Trajectory.Segments[Index], Trajectory.Segments[Index + 1],
+						BoneLocation, Origin.Z, ActorScale, Yaw,
+						AimPointAlongBlade, CenteredStance))
+					{
+						Evaluate(CenteredStance.GetLocation(), Yaw, false);
+					}
+				}
+			}
+		}
 	}
 
 	FVector Approach = (Origin - Target).GetSafeNormal2D();
@@ -1302,17 +1426,6 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 
 	const TMap<FName, uint8*>& Rows =
 		CombatTargets->GetRowMap();
-	const float FirstFraction = FMath::Clamp(
-		FMath::Min(AimWindowStartFraction, AimWindowEndFraction), 0.f, 1.f);
-	const float LastFraction = FMath::Clamp(
-		FMath::Max(AimWindowStartFraction, AimWindowEndFraction), 0.f, 1.f);
-	const int32 FirstSample = FMath::Clamp(
-		FMath::CeilToInt(FirstFraction * float(Trajectory.Segments.Num() - 1)),
-		0, Trajectory.Segments.Num() - 1);
-	const int32 LastSample = FMath::Clamp(
-		FMath::FloorToInt(LastFraction * float(Trajectory.Segments.Num() - 1)),
-		FirstSample, Trajectory.Segments.Num() - 1);
-
 	for (const TPair<FName, uint8*>& Pair :
 		 Rows)
 	{
@@ -1360,21 +1473,21 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 				VictimMesh->GetSocketLocation(Bone);
 			const float ContactRadius =
 				CombatTargetRules::GetContactRadiusCm(RegionName, *Row);
+			const float AimRadius = RegionName == TEXT("Head")
+				? ContactRadius * 0.5f : ContactRadius;
 
-			for (int32 Index = FirstSample; Index <= LastSample; ++Index)
+			int32 ContactSample = INDEX_NONE;
+			float ContactFraction = -1.f;
+			const float Miss = EvaluateTrajectoryContactMiss(
+				Trajectory, RootTransform, Contact, AimRadius,
+				AimPointAlongBlade, AimWindowStartFraction,
+				AimWindowEndFraction, ContactSample, ContactFraction);
+			if (Miss < RegionBestMiss)
 			{
-				const FBladeSegment& Segment = Trajectory.Segments[Index];
-				float ContactFraction = -1.f;
-				const float Miss = EvaluateBladeContactMiss(
-					Segment, RootTransform, Contact, ContactRadius,
-					AimPointAlongBlade, ContactFraction);
-				if (Miss < RegionBestMiss)
-				{
-					RegionBestMiss = Miss;
-					RegionBestBone = Bone;
-					RegionBestSample = Index;
-					RegionBestFraction = ContactFraction;
-				}
+				RegionBestMiss = Miss;
+				RegionBestBone = Bone;
+				RegionBestSample = ContactSample;
+				RegionBestFraction = ContactFraction;
 			}
 		}
 
@@ -1922,7 +2035,7 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 				0,
 				2.f);
 
-			if (bFoundFeasible && I <= OutSampleIndex)
+			if (bFoundFeasible && I <= OutSampleIndex + 1)
 			{
 				DrawDebugLine(World,
 					OutAttackerTransform.TransformPosition(A),
@@ -1939,11 +2052,16 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 
 		const FVector TargetPoint = VictimMesh->GetSocketLocation(OutBone);
 		const FBladeSegment& AimSample = Trajectory.Segments[OutSampleIndex];
-		const FVector BladeBase = OutAttackerTransform.TransformPosition(AimSample.Base);
-		const FVector BladeTip = OutAttackerTransform.TransformPosition(AimSample.Tip);
-		const FVector PlannedContact = AimPointAlongBlade < 0.f
-			? FMath::ClosestPointOnSegment(TargetPoint, BladeBase, BladeTip)
-			: FMath::Lerp(BladeBase, BladeTip, FMath::Clamp(AimPointAlongBlade, 0.f, 1.f));
+		const float BladeFraction = AimPointAlongBlade < 0.f
+			? 1.f : FMath::Clamp(AimPointAlongBlade, 0.f, 1.f);
+		const FVector ContactStart = OutAttackerTransform.TransformPosition(
+			FMath::Lerp(AimSample.Base, AimSample.Tip, BladeFraction));
+		const FBladeSegment& EndSample = Trajectory.Segments[
+			FMath::Min(OutSampleIndex + 1, Trajectory.Segments.Num() - 1)];
+		const FVector ContactEnd = OutAttackerTransform.TransformPosition(
+			FMath::Lerp(EndSample.Base, EndSample.Tip, BladeFraction));
+		const FVector PlannedContact = FMath::ClosestPointOnSegment(
+			TargetPoint, ContactStart, ContactEnd);
 		DrawDebugSphere(World, TargetPoint, 6.f, 12, FColor::Green, false, 0.55f);
 		DrawDebugLine(World, PlannedContact, TargetPoint, FColor::Green,
 			false, 0.55f, 0, 2.f);
