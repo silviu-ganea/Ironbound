@@ -1,6 +1,6 @@
 # UE 5.8 sword mocap-to-gameplay guide
 
-Ironbound's proven monocular sword workflow, recorded 2026-09-15. Project engine: UE 5.8.2. See [Combat Prototype Roadmap](COMBAT_PROTOTYPE.md) for combat architecture, physics experiments, and project status.
+Ironbound's proven monocular sword workflow, recorded 2026-09-15. Project engine: UE 5.8.2.
 
 This guide records the successful session procedure supplied by the project owner. The documentation update does not process footage, change animation assets, replace Montage segments, or test gameplay.
 
@@ -50,7 +50,7 @@ Keep the Performer Skeleton export as the source for retargeting. Do not select 
 4. Preview and export the retargeted animation. The concrete batch/attack sequence is **AS_Mocap_SwordBatch02_Attack01_UEFN**.
 5. Save a clean, unmodified retargeted master before applying any modifiers.
 
-These template choices are the proven pairing for this capture, not a reason to restart the abandoned Mixamo pipeline described in the roadmap.
+These template choices are the proven pairing for this capture, not a reason to restart the abandoned Mixamo retargeting pipeline.
 
 ## 4. Correct mirrored footage after retargeting
 
@@ -90,7 +90,7 @@ The existing attack Montage is **AM_Mocap_SwordSwing_01**, using **DefaultGroup.
 
 ### What is verified about wiring
 
-- The roadmap records `SandboxCharacter_Mover` as the main character, a reusable `Attack` event, and `SwordAttackSlot` after stance selection in `SandboxCharacter_Mover_ABP`. Its older attack-test entry named `AM_TestSword_CleanSwing1` and temporary Key 1 input.
+- The main character Blueprint is `SandboxCharacter_Mover` with a reusable `Attack` event, and `SwordAttackSlot` sits after stance selection in `SandboxCharacter_Mover_ABP`. Its older attack-test entry was `AM_TestSword_CleanSwing1` with temporary Key 1 input.
 - Read-only inspection of the local `Content/Blueprints/SandboxCharacter_Mover.uasset` found an `AM_Mocap_SwordSwing_01` reference and Play Montage-related names.
 - The local Montage binary contains `SwordAttackSlot` and an `AS_Mocap_SwordBatch02_Attack01_UEFN` reference. The full `DefaultGroup.SwordAttackSlot` designation is the project owner's confirmed setup.
 - Binary name/reference inspection does **not** prove graph connections, the active input path, callback wiring, or runtime behavior. Exact current Blueprint execution wiring must be checked in Unreal before describing node-by-node connections. This update makes no such claim.
@@ -129,6 +129,6 @@ Use an actor-forward target placement to assess the swing. Do not rotate the pel
 | Considering root reorientation or manual pelvis rotation | Those were wrong/unnecessary for this case; restore clean retarget + MirrorModifier. |
 | Unclear whether an animation is already mirrored | Inspect modifier/application state and preview in Unreal; names and binary references alone are insufficient. Keep a clean master. |
 | Frozen/stalled motion in part of the solve | Check for unsolved frames: Last Valid Frame can hold the last valid pose. Review footage/range and solve quality before accepting export. |
-| New sequence previews correctly but gameplay differs | Verify the existing Montage segment, slot path, timing, and physical setup in Unreal. The roadmap records Physics Control/constraint issues that can distort otherwise good animation. |
+| New sequence previews correctly but gameplay differs | Verify the existing Montage segment, slot path, timing, and physical setup in Unreal. Physics Control and sword constraint issues can distort otherwise good animation. |
 | Considering recreating the Montage | Preserve AM_Mocap_SwordSwing_01 and its structure; replace only the sequence segment to retain existing references. |
 | Small target alignment error remains | Assess actor-facing and target placement. Target-facing/Motion Warping are future alignment work, not part of this documentation change. |
