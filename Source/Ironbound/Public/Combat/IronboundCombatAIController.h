@@ -67,9 +67,9 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Techniques")
 	FName PreferredReactiveTechnique;
 
-	/** Region requested for deliberate strikes; empty defers to the technique config. */
+	/** Optional policy restriction for deliberate strikes; empty lets geometry choose a useful contact. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Techniques")
-	FName PreferredAttackTargetRegion = TEXT("Head");
+	FName PreferredAttackTargetRegion;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Debug")
 	bool bShowIntentDebug = true;

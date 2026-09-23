@@ -299,17 +299,19 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 
 		if (HasStanceTimedOut(Now))
 		{
+			UE_LOG(LogIronboundCombat, Warning,
+				TEXT("MeleeStrike [%s | %s] stance timed out: region=%s bone=%s arrived=%d miss=%.1fcm yaw=%.1fdeg speed=%.1fcm/s"),
+				*GetNameSafe(Fighter), *GetRequest().TechniqueId.ToString(),
+				*PlannedTargetRegion.ToString(), *PlannedTargetBone.ToString(),
+				bAtStancePosition ? 1 : 0, CurrentPredictedDistance,
+				FacingErrorDegrees, MeasuredSpeed);
 			FinishExecution(TEXT("stance timed out"));
 			return;
 		}
 
-		// Track a moving target: re-solve while waiting, exactly like the old
-		// per-call re-solve did.
-		if (!SolveAttackPlan())
-		{
-			FinishExecution(TEXT("attack plan lost"));
-			return;
-		}
+		// Keep the admitted stance stable while navigation satisfies it.
+		// A later planner can explicitly replace this intent for moving targets;
+		// running a global search every tick makes the goal orbit the defender.
 
 		bAtStancePosition = IsAtStancePosition();
 
@@ -321,6 +323,17 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 
 			UpdateFacingError();
 			AttackFacingIntent = PlannedTransform.GetRotation().GetForwardVector();
+			FName ActualRegion, ActualBone;
+			int32 ActualSample = INDEX_NONE;
+			float ActualScore = 0.f;
+			CurrentPredictedDistance = UCombatTrajectoryLibrary::EvaluateScoredContact(
+				PlannedTrajectory, Fighter->GetActorTransform(),
+				PlannedTarget->FindComponentByClass<USkeletalMeshComponent>(),
+				StrikeConfig()->CombatTargets, ActualRegion, ActualBone,
+				ActualSample, ActualScore, PlannedTargetRegion,
+				StrikeConfig()->AimPointAlongBlade,
+				StrikeConfig()->AimWindowStartFraction,
+				StrikeConfig()->AimWindowEndFraction, PlannedTargetBone);
 
 			if (IsReadyToCommit())
 			{

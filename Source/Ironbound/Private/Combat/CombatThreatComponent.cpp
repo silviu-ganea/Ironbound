@@ -109,6 +109,9 @@ void UCombatThreatComponent::TickComponent(
 			}
 
 			Observation.bRecognized = true;
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("Threat recognized [%s] attacker %s"),
+				*GetNameSafe(GetOwner()), *GetNameSafe(Attacker.Get()));
 		}
 	}
 }

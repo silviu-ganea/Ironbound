@@ -440,8 +440,15 @@ void AIronboundCombatAIController::UpdateMovementRequest()
 		if (MoveResult == EPathFollowingRequestResult::Failed)
 		{
 			UE_LOG(LogIronboundCombat, Warning,
-				TEXT("Combat AI [%s]: navigation could not reach the requested combat stance"),
-				*GetNameSafe(GetPawn()));
+				TEXT("Combat AI [%s]: navigation could not reach combat stance %s"),
+				*GetNameSafe(GetPawn()), *Requirement.DesiredLocation.ToCompactString());
+		}
+		else if (bGoalChanged)
+		{
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("Combat AI [%s]: moving to combat stance %s (arrival %.1fcm)"),
+				*GetNameSafe(GetPawn()), *Requirement.DesiredLocation.ToCompactString(),
+				AcceptanceRadius);
 		}
 	}
 }
