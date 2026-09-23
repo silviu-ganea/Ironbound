@@ -824,13 +824,16 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 		float Score = 0.f;
 		const float Miss = EvaluateScoredContact(Trajectory, Stance, VictimMesh, CombatTargets,
 			Region, Bone, Sample, Score, RequiredRegion, AimPointAlongBlade,
-			AimWindowStartFraction, AimWindowEndFraction);
-		const bool bFeasible = Sample != INDEX_NONE && Miss <= ContactToleranceCm;
+			AimWindowStartFraction, AimWindowEndFraction, NAME_None, true);
+		const bool bFeasible = Sample != INDEX_NONE &&
+			Miss <= FMath::Min(ContactToleranceCm, 12.f);
+		const float Standoff = FVector::Dist2D(Location, Target);
 		const float Quality = bFeasible
-			? (IsPrimaryContactBone(Bone) ? 20.f : 0.f) + Score * 10.f - Miss * 0.2f
+			? (IsPrimaryContactBone(Bone) ? 60.f : 0.f) + Score * 0.1f +
+				Standoff * 0.5f - Miss * 4.f
 			: 0.f;
-		const float Utility = Quality - MoveCost * 0.08f;
-		const float BestUtility = Best.Quality - Best.MovementCostCm * 0.08f;
+		const float Utility = Quality - MoveCost * 0.03f;
+		const float BestUtility = Best.Quality - Best.MovementCostCm * 0.03f;
 		if ((!bFeasible && Best.bFeasible) ||
 			(bFeasible && Best.bFeasible && Utility <= BestUtility + KINDA_SMALL_NUMBER) ||
 			(!bFeasible && !Best.bFeasible && Miss >= Best.MissCm))
@@ -848,35 +851,33 @@ void UCombatTrajectoryLibrary::FindAttackOpportunities(
 		Best.ContactScore = Score;
 		Best.Quality = Quality;
 		Best.MovementCostCm = MoveCost;
+		Best.StandoffCm = Standoff;
+		Best.AimPointAlongBlade = AimPointAlongBlade;
 	};
 
 	const float CurrentFacing = (Target - Origin).GetSafeNormal2D().Rotation().Yaw;
 	Evaluate(Origin, Attacker->GetActorRotation().Yaw, OutCurrent, true);
-	for (int32 Y = -4; Y <= 4; ++Y)
+	for (int32 Y = -8; Y <= 8; ++Y)
 	{
-		Evaluate(Origin, CurrentFacing + FacingLimit * float(Y) / 4.f, OutCurrent, true);
+		Evaluate(Origin, CurrentFacing + FacingLimit * float(Y) / 8.f, OutCurrent, true);
 	}
 
 	FVector Approach = (Origin - Target).GetSafeNormal2D();
 	if (Approach.IsNearlyZero()) Approach = -Attacker->GetActorForwardVector().GetSafeNormal2D();
-	const float Distances[] = {
-		FMath::Clamp(CurrentDistance, MinimumDistance, MaximumDistance),
-		MinimumDistance,
-		FMath::Lerp(MinimumDistance, MaximumDistance, 0.25f),
-		FMath::Lerp(MinimumDistance, MaximumDistance, 0.5f),
-		FMath::Lerp(MinimumDistance, MaximumDistance, 0.75f),
-		MaximumDistance };
-	for (float Distance : Distances)
+	for (int32 D = -1; D <= 16; ++D)
 	{
+		const float Distance = D < 0
+			? FMath::Clamp(CurrentDistance, MinimumDistance, MaximumDistance)
+			: FMath::Lerp(MinimumDistance, MaximumDistance, float(D) / 16.f);
 		for (int32 A = -4; A <= 4; ++A)
 		{
 			const FVector Direction = Approach.RotateAngleAxis(float(A) * 15.f, FVector::UpVector);
 			const FVector Location = FVector(Target.X + Direction.X * Distance,
 				Target.Y + Direction.Y * Distance, Origin.Z);
 			const float FacingYaw = (Target - Location).GetSafeNormal2D().Rotation().Yaw;
-			for (int32 Y = -4; Y <= 4; ++Y)
+			for (int32 Y = -8; Y <= 8; ++Y)
 			{
-				Evaluate(Location, FacingYaw + FacingLimit * float(Y) / 4.f, OutNearby, false);
+				Evaluate(Location, FacingYaw + FacingLimit * float(Y) / 8.f, OutNearby, false);
 			}
 		}
 	}
@@ -895,7 +896,8 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 	float AimPointAlongBlade,
 	float AimWindowStartFraction,
 	float AimWindowEndFraction,
-	FName RequiredBone)
+	FName RequiredBone,
+	bool bPreferContactMargin)
 {
 	OutRegion = NAME_None;
 	OutBone = NAME_None;
@@ -1041,13 +1043,14 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 				GContactToleranceCm;
 
 		const bool bPrimary = IsPrimaryContactBone(RegionBestBone);
+		const float CandidateMarginCost = RegionBestMiss - (bPrimary ? 15.f : 0.f);
+		const float BestMarginCost = BestFeasibleMiss - (bBestFeasiblePrimary ? 15.f : 0.f);
 		if (bFeasible &&
-			(!bBestFeasiblePrimary && bPrimary ||
-			 bBestFeasiblePrimary == bPrimary && IsBetterContact(
-				Row->Score,
-				RegionBestMiss,
-				BestFeasibleScore,
-				BestFeasibleMiss)))
+			(bPreferContactMargin
+				? (OutSample == INDEX_NONE || CandidateMarginCost < BestMarginCost)
+				: (!bBestFeasiblePrimary && bPrimary ||
+					bBestFeasiblePrimary == bPrimary && IsBetterContact(
+						Row->Score, RegionBestMiss, BestFeasibleScore, BestFeasibleMiss))))
 		{
 			bBestFeasiblePrimary = bPrimary;
 			BestFeasibleScore =

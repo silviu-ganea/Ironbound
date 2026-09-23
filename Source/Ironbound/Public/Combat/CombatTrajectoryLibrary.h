@@ -115,6 +115,10 @@ struct IRONBOUND_API FCombatAttackOpportunity
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float ContactScore = 0.f;
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float Quality = 0.f;
 	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float MovementCostCm = 0.f;
+	/** Root-to-target horizontal distance at this stance. */
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float StandoffCm = 0.f;
+	/** Blade fraction used for this opportunity's contact check. */
+	UPROPERTY(BlueprintReadOnly, Category="Combat|Planning") float AimPointAlongBlade = -1.f;
 };
 
 /**
@@ -183,7 +187,8 @@ public:
 		float AimPointAlongBlade = -1.f,
 		float AimWindowStartFraction = 0.f,
 		float AimWindowEndFraction = 1.f,
-		FName RequiredBone = NAME_None);
+		FName RequiredBone = NAME_None,
+		bool bPreferContactMargin = false);
 
 	/**
 	 * Search attacker yaw and stand-off for a feasible contact against the

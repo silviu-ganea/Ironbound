@@ -10,9 +10,11 @@
 #include "Combat/CombatReactionComponent.h"
 #include "Combat/CombatInteractionLibrary.h"
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/IronboundCombatAIController.h"
 #include "Combat/CombatTechniqueRow.h"
 #include "Engine/DataTable.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "CollisionQueryParams.h"
 #include "Engine/World.h"
@@ -369,6 +371,20 @@ float UCombatExecutionComponent::GetCombatFacingDelta() const
 FVector UCombatExecutionComponent::ResolveOrientationIntent(
 	FVector LocomotionIntent) const
 {
+	// During pursuit the navigation travel direction owns facing. The combat
+	// focus is still tracked, but using it here makes GASP backpedal on the
+	// initial approach when the path curves around the target.
+	if (const APawn* Pawn = Cast<APawn>(GetOwner()))
+	{
+		if (const AIronboundCombatAIController* AI =
+			Cast<AIronboundCombatAIController>(Pawn->GetController()))
+		{
+			if (AI->GetCombatMovementMode() == EIronboundAIMovementMode::Pursuit)
+			{
+				return LocomotionIntent;
+			}
+		}
+	}
 	for (const FCombatExecutionRecord& Record : Executions)
 	{
 		if (Record.Kind == ECombatExecutionKind::Deliberate &&

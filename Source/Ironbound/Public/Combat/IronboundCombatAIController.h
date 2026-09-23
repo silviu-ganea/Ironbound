@@ -73,8 +73,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0"))
 	float MeaningfulQualityGain = 4.f;
 
+	/** A feasible attack this much farther from the target is chosen before the preference roll. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="0.0"))
+	float MinimumRangeGainForRepositionCm = 15.f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category="Ironbound AI|Decision", meta=(ClampMin="10.0"))
-	float TargetDisplacementToleranceCm = 75.f;
+	float TargetDisplacementToleranceCm = 10.f;
 
 	UFUNCTION(BlueprintPure, Category="Ironbound AI|Movement")
 	EIronboundAIMovementMode GetCombatMovementMode() const { return MovementMode; }
@@ -161,6 +165,7 @@ private:
 	float NextPathRequestWorldTime = 0.f;
 	bool bHasMoveGoal = false;
 	bool bMoveRequestActive = false;
+	float NextStandingPlanWorldTime = 0.f;
 	bool bHadActiveDeliberate = false;
 	bool bPlanEverCommitted = false;
 	bool bLoggedNoDeliberateTechnique = false;

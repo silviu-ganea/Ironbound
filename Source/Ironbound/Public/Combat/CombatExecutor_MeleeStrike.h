@@ -78,6 +78,7 @@ private:
 	FName PlannedTargetBone = NAME_None;
 	int32 PlannedContactSampleIndex = INDEX_NONE;
 	float PlannedTargetScore = 0.f;
+	float PlannedAimPointAlongBlade = -1.f;
 	float CurrentPredictedDistance = 0.f;
 
 	FVector AttackFacingIntent = FVector::ZeroVector;

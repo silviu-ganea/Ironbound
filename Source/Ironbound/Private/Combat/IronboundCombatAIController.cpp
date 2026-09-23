@@ -16,6 +16,7 @@
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "DefaultMovementSet/CharacterMoverComponent.h"
 #include "DrawDebugHelpers.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "TimerManager.h"
@@ -38,6 +39,7 @@ void AIronboundCombatAIController::OnPossess(APawn* InPawn)
 	LastAnsweredThreatTechnique = NAME_None;
 	bHasMoveGoal = false;
 	bMoveRequestActive = false;
+	NextStandingPlanWorldTime = 0.f;
 	bHadActiveDeliberate = false;
 	bPlanEverCommitted = false;
 	bLoggedNoDeliberateTechnique = false;
@@ -254,9 +256,11 @@ FVector AIronboundCombatAIController::ResolveCombatMovementFacing(FVector Travel
 	{
 		return ActiveOpportunity.Stance.GetRotation().GetForwardVector();
 	}
-	if (MovementMode == EIronboundAIMovementMode::GuardManeuver && PlannedTarget.IsValid() && GetPawn())
+	if (MovementMode == EIronboundAIMovementMode::GuardManeuver && GetPawn())
 	{
-		FVector Facing = (PlannedTarget->GetActorLocation() - GetPawn()->GetActorLocation()).GetSafeNormal2D();
+		const AActor* FacingTarget = PlannedTarget.IsValid() ? PlannedTarget.Get() : CurrentTarget.Get();
+		if (!FacingTarget) return TravelIntent;
+		FVector Facing = (FacingTarget->GetActorLocation() - GetPawn()->GetActorLocation()).GetSafeNormal2D();
 		if (const USkeletalMeshComponent* Mesh = GetPawn()->FindComponentByClass<USkeletalMeshComponent>())
 		{
 			Facing = FRotator(0.f, Facing.Rotation().Yaw - Mesh->GetRelativeRotation().Yaw, 0.f).Vector();
@@ -269,6 +273,24 @@ FVector AIronboundCombatAIController::ResolveCombatMovementFacing(FVector Travel
 void AIronboundCombatAIController::SetMovementMode(EIronboundAIMovementMode NewMode, const TCHAR* Reason)
 {
 	if (MovementMode == NewMode) return;
+	// GASP reads Mover's crouch state for its crouch locomotion. Use it only
+	// during footwork; restore standing geometry before strike alignment.
+	if (APawn* ControlledPawn = GetPawn())
+	{
+		if (UCharacterMoverComponent* Mover = ControlledPawn->FindComponentByClass<UCharacterMoverComponent>())
+		{
+			if (NewMode == EIronboundAIMovementMode::GuardManeuver)
+			{
+				if (!Mover->IsCrouching() && Mover->CanCrouch()) Mover->Crouch();
+			}
+			else if (Mover->IsCrouching())
+			{
+				Mover->UnCrouch();
+				NextStandingPlanWorldTime = GetWorld()
+					? GetWorld()->GetTimeSeconds() + 0.25f : 0.f;
+			}
+		}
+	}
 	if (NewMode == EIronboundAIMovementMode::Pursuit)
 	{
 		PursuitIntentId = NextPlanId++;
@@ -288,9 +310,10 @@ void AIronboundCombatAIController::SetMovementMode(EIronboundAIMovementMode NewM
 	}
 	UE_LOG(LogIronboundCombat, Log, TEXT("[AI] MOVEMENT PlanId=%d Mode=%s Reason=%s"),
 		NewMode == EIronboundAIMovementMode::Pursuit ? PursuitIntentId : ActivePlanId, ModeName, Reason);
-	if (NewMode == EIronboundAIMovementMode::GuardManeuver && PlannedTarget.IsValid())
+	if (NewMode == EIronboundAIMovementMode::GuardManeuver &&
+		(PlannedTarget.IsValid() || CurrentTarget.IsValid()))
 	{
-		SetFocus(PlannedTarget.Get());
+		SetFocus(PlannedTarget.IsValid() ? PlannedTarget.Get() : CurrentTarget.Get());
 	}
 	else if (NewMode == EIronboundAIMovementMode::Pursuit || NewMode == EIronboundAIMovementMode::Idle)
 	{
@@ -435,26 +458,35 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 	}
 	const FName RequiredRegion = PreferredAttackTargetRegion.IsNone()
 		? Config->DefaultTargetRegion : PreferredAttackTargetRegion;
+	// The AI's overhead cut seeks a distal blade hit. Player requests retain the
+	// technique's authored blade policy; this is a tactical choice at the query.
+	const float PlanningAimPoint = Config->AimPointAlongBlade < 0.f
+		? 1.f : Config->AimPointAlongBlade;
 	FCombatAttackOpportunity Current, Nearby;
 	UCombatTrajectoryLibrary::FindAttackOpportunities(AttackerMesh, TargetMesh, Trajectory,
-		Config->CombatTargets, TechniqueId, RequiredRegion, Config->AimPointAlongBlade,
+		Config->CombatTargets, TechniqueId, RequiredRegion, PlanningAimPoint,
 		Config->AimWindowStartFraction, Config->AimWindowEndFraction,
 		Config->MaxFacingDeviationFromTargetDegrees, Config->ContactToleranceCm,
 		MaxNearbyMoveCm, Current, Nearby);
 	UE_LOG(LogIronboundCombat, Log,
-		TEXT("[AI] OPPORTUNITIES PlanId=%d Current feasible=%d region=%s bone=%s quality=%.1f miss=%.1fcm; Nearby feasible=%d region=%s bone=%s quality=%.1f miss=%.1fcm move=%.1fcm stance=%s"),
-		DecisionId, Current.bFeasible ? 1 : 0, *Current.Region.ToString(), *Current.Bone.ToString(),
-		Current.Quality, Current.MissCm, Nearby.bFeasible ? 1 : 0,
-		*Nearby.Region.ToString(), *Nearby.Bone.ToString(), Nearby.Quality, Nearby.MissCm,
+		TEXT("[AI] OPPORTUNITIES PlanId=%d aimBlade=%.2f Current feasible=%d region=%s bone=%s quality=%.1f tipMiss=%.1fcm range=%.1fcm; Nearby feasible=%d region=%s bone=%s quality=%.1f tipMiss=%.1fcm range=%.1fcm move=%.1fcm stance=%s"),
+		DecisionId, PlanningAimPoint, Current.bFeasible ? 1 : 0, *Current.Region.ToString(), *Current.Bone.ToString(),
+		Current.Quality, Current.MissCm, Current.StandoffCm, Nearby.bFeasible ? 1 : 0,
+		*Nearby.Region.ToString(), *Nearby.Bone.ToString(), Nearby.Quality, Nearby.MissCm, Nearby.StandoffCm,
 		Nearby.MovementCostCm, *Nearby.Stance.GetLocation().ToCompactString());
-	const float Improvement = Nearby.Quality - Nearby.MovementCostCm * 0.08f - Current.Quality;
+	const float Improvement = Nearby.Quality - Nearby.MovementCostCm * 0.03f - Current.Quality;
+	const float RangeGain = Nearby.StandoffCm - Current.StandoffCm;
+	const bool bRangeImprovement = Current.bFeasible && Nearby.bFeasible &&
+		RangeGain >= MinimumRangeGainForRepositionCm;
 	const bool bNearbyUseful = Nearby.bFeasible &&
-		(!Current.bFeasible || Improvement >= MeaningfulQualityGain);
-	const float Roll = Current.bFeasible && bNearbyUseful ? FMath::FRand() : -1.f;
-	const bool bReposition = bNearbyUseful && (!Current.bFeasible || Roll < RepositionPreference);
+		(!Current.bFeasible || bRangeImprovement || Improvement >= MeaningfulQualityGain);
+	const float Roll = Current.bFeasible && bNearbyUseful && !bRangeImprovement
+		? FMath::FRand() : -1.f;
+	const bool bReposition = bNearbyUseful &&
+		(!Current.bFeasible || bRangeImprovement || Roll < RepositionPreference);
 	UE_LOG(LogIronboundCombat, Log,
-		TEXT("[AI] POLICY PlanId=%d RepositionPreference=%.2f Roll=%.3f ImprovementAfterMove=%.1f"),
-		DecisionId, RepositionPreference, Roll, Improvement);
+		TEXT("[AI] POLICY PlanId=%d RepositionPreference=%.2f Roll=%.3f RangeGain=%.1fcm ImprovementAfterMove=%.1f"),
+		DecisionId, RepositionPreference, Roll, RangeGain, Improvement);
 	if (!Current.bFeasible && !Nearby.bFeasible)
 	{
 		RejectedTrajectory = Trajectory;
@@ -485,12 +517,14 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 	ActivePlanId = DecisionId;
 	PlannedTarget = Target;
 	UE_LOG(LogIronboundCombat, Log,
-		TEXT("[AI] CHOICE PlanId=%d Intent=%s Reason=%s region=%s bone=%s quality=%.1f move=%.1fcm destination=%s yaw=%.1f"),
+		TEXT("[AI] CHOICE PlanId=%d Intent=%s Reason=%s region=%s bone=%s quality=%.1f range=%.1fcm tipMiss=%.1fcm move=%.1fcm destination=%s yaw=%.1f"),
 		ActivePlanId, bReposition ? TEXT("RepositionForAttack") : TEXT("AttackFromCurrentPosition"),
-		bReposition ? (Current.bFeasible ? TEXT("UsefulImprovementWonPolicyRoll") : TEXT("CurrentCannotHitNearbyCan"))
+		bReposition ? (!Current.bFeasible ? TEXT("CurrentCannotTipHitNearbyCan")
+			: bRangeImprovement ? TEXT("FartherTipContact") : TEXT("UsefulImprovementWonPolicyRoll"))
 			: (bNearbyUseful ? TEXT("CurrentAttackWonPolicyRoll") : TEXT("CurrentAttackGoodRepositionNotWorthCost")),
 		*ActiveOpportunity.Region.ToString(), *ActiveOpportunity.Bone.ToString(),
-		ActiveOpportunity.Quality, ActiveOpportunity.MovementCostCm,
+		ActiveOpportunity.Quality, ActiveOpportunity.StandoffCm, ActiveOpportunity.MissCm,
+		ActiveOpportunity.MovementCostCm,
 		*ActiveOpportunity.Stance.GetLocation().ToCompactString(), ActiveOpportunity.Stance.Rotator().Yaw);
 	FCombatTechniqueRequest Request;
 	Request.TechniqueId = TechniqueId;
@@ -630,7 +664,9 @@ void AIronboundCombatAIController::DecisionStep()
 		FVector::Dist2D(Target->GetActorLocation(), ActiveOpportunity.TargetLocationAtQuery) >
 			TargetDisplacementToleranceCm)
 	{
-		ClearAttackPlan(TEXT("TargetDisplacedBeyondPlanTolerance"), true);
+		ClearAttackPlan(TEXT("TargetMovedDuringPreparation"), true);
+		ConsecutiveFailedPlans = 0;
+		NextDeliberateAttemptWorldTime = Now + 0.1f;
 	}
 	if (ActivePlanId != 0 && bHasActiveDeliberate && Execution->IsCommitted() && !bPlanEverCommitted)
 	{
@@ -656,6 +692,26 @@ void AIronboundCombatAIController::DecisionStep()
 		}
 		else if (Now >= NextDeliberateAttemptWorldTime)
 		{
+			// A crouched attacker has a lower actor origin and a different
+			// mesh pose. Sample the sword arc only after returning to the
+			// standing geometry used by the strike montage.
+			if (MovementMode == EIronboundAIMovementMode::GuardManeuver &&
+				!FindAvailableTechnique(ECombatTechniqueKind::Deliberate,
+					PreferredDeliberateTechnique).IsNone())
+			{
+				SetMovementMode(EIronboundAIMovementMode::Idle, TEXT("StandForStrikePlanning"));
+				UpdateMovementRequest();
+				return;
+			}
+			if (const UCharacterMoverComponent* Mover =
+				ControlledPawn->FindComponentByClass<UCharacterMoverComponent>())
+			{
+				if (Mover->IsCrouching() || Now < NextStandingPlanWorldTime)
+				{
+					UpdateMovementRequest();
+					return;
+				}
+			}
 			if (ConsecutiveFailedPlans >= 3)
 			{
 				if (FVector::Dist2D(Target->GetActorLocation(), FailedPlanTargetLocation) <=
@@ -680,6 +736,12 @@ void AIronboundCombatAIController::DecisionStep()
 			}
 			bClosingForOpportunity = false;
 			ChooseAttackPlan(Target, Now);
+		}
+		if (ActivePlanId == 0 && !bClosingForOpportunity &&
+			MovementMode == EIronboundAIMovementMode::Idle)
+		{
+			SetMovementMode(EIronboundAIMovementMode::GuardManeuver,
+				TEXT("HoldingCombatRange"));
 		}
 	}
 
@@ -721,7 +783,9 @@ void AIronboundCombatAIController::UpdateMovementRequest()
 	const FCombatEngagementRequirement Requirement = Execution->GetEngagementRequirement();
 	if (ActivePlanId != 0 && !Execution->IsCommitted() &&
 		MovementMode == EIronboundAIMovementMode::AttackAlignment &&
-		Requirement.bHasRequirement && Requirement.bMayMoveDuringExecution)
+		Requirement.bHasRequirement && Requirement.bMayMoveDuringExecution &&
+		FVector::DistSquared2D(GetPawn()->GetActorLocation(), Requirement.DesiredLocation) >
+			FMath::Square(FMath::Max(1.f, Requirement.ArrivalTolerance)))
 	{
 		SetMovementMode(EIronboundAIMovementMode::GuardManeuver,
 			TEXT("LeftStanceBeforeCommit"));
@@ -748,6 +812,14 @@ void AIronboundCombatAIController::UpdateMovementRequest()
 	if (FVector::DistSquared2D(GetPawn()->GetActorLocation(), Goal) <=
 		FMath::Square(AcceptanceRadius))
 	{
+		// Crouch lowers the Mover actor origin by about 26 cm. The stance is
+		// reached in the ground plane; stand before the executor checks its
+		// full 3D transform and strike geometry.
+		if (bGuardMove)
+		{
+			SetMovementMode(EIronboundAIMovementMode::AttackAlignment,
+				TEXT("ReachedStanceGroundPosition"));
+		}
 		if (GetMoveStatus() != EPathFollowingStatus::Idle)
 		{
 			StopMovement();
