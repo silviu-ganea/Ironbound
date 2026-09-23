@@ -347,12 +347,17 @@ void AIronboundCombatAIController::DecisionStep()
 			FCombatTechniqueRequest Request;
 			Request.TechniqueId = AttackTechnique;
 			Request.Target = Target;
+			Request.TargetRegion = PreferredAttackTargetRegion;
 
 			NextDeliberateAttemptWorldTime = Now + FMath::Max(0.05f, DeliberateRetryIntervalSeconds);
 			if (Execution->CanExecuteTechnique(Request) && Execution->RequestTechnique(Request))
 			{
 				const FCombatTechniqueRow* Row = Techniques->FindRow(AttackTechnique);
-				PublishIntent(Row ? *FString::Printf(TEXT("Attack: %s"), *Row->DisplayName.ToString()) : TEXT("Attack"), Target);
+				PublishIntent(
+					*FString::Printf(TEXT("Attack: %s -> %s"),
+						Row ? *Row->DisplayName.ToString() : TEXT("technique"),
+						Request.TargetRegion.IsNone() ? TEXT("technique default") : *Request.TargetRegion.ToString()),
+					Target);
 			}
 		}
 	}

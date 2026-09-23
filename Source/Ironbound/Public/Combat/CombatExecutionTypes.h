@@ -138,6 +138,10 @@ struct IRONBOUND_API FCombatTechniqueRequest
 	UPROPERTY(BlueprintReadWrite, Category="Combat|Request")
 	TObjectPtr<AActor> Target;
 
+	/** Optional anatomical region row name (for example Head); empty uses the technique's default. */
+	UPROPERTY(BlueprintReadWrite, Category="Combat|Request")
+	FName TargetRegion = NAME_None;
+
 	/** Threat payload for reactive techniques; advisory for deliberate ones. */
 	UPROPERTY(BlueprintReadWrite, Category="Combat|Request")
 	FCombatThreatContext ThreatContext;

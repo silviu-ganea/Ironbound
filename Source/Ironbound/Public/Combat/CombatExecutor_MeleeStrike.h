@@ -74,6 +74,7 @@ private:
 
 	FName PlannedTargetRegion = NAME_None;
 	FName PlannedTargetBone = NAME_None;
+	int32 PlannedContactSampleIndex = INDEX_NONE;
 	float PlannedTargetScore = 0.f;
 	float CurrentPredictedDistance = 0.f;
 

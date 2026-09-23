@@ -1,3 +1,13 @@
+## Verified manual Editor build command (UE 5.8.2)
+
+From Command Prompt, with Unreal Editor closed and the current directory set to `X:\Projects\UnrealEngineProjects\Ironbound`, run this exact command:
+
+```cmd
+"X:\Tools\UE_5.8\Engine\Build\BatchFiles\Build.bat" IronboundEditor Win64 Development -Project="X:\Projects\UnrealEngineProjects\Ironbound\Ironbound.uproject" -WaitMutex -UBARootDir="X:\Projects\UnrealEngineProjects\Ironbound\Saved\UBACache" -Log="X:\Projects\UnrealEngineProjects\Ironbound\Saved\Logs\Ironbound_UE582_ManualBuild.log"
+```
+
+`UE_5.8` is the installation folder name; the installed engine is 5.8.2. The project owner has confirmed this command succeeds in Command Prompt. On 2026-09-23, sandboxed Codex `exec_command` builds exited during `dotnet.exe` startup with Windows exception `0xe0434352`. The same Build.bat target and flags succeeded from `cmd.exe` with an unsandboxed tool invocation: `UnrealEditor-Ironbound.dll` compiled and linked in 15.80 seconds. This was a tool sandbox issue, not a C++ compile failure. Keep the editor closed during full builds.
+
 ## Current handoff state — 2026-09-22
 
 The native Editor target now builds, and `/Game/Blueprints/SandboxCharacter_Mover` compiles with **zero errors and zero warnings**. The Blueprint cleanup removed the old attack trigger and sword-hit damage flow, and removed the obsolete `InitializeFocus` hookup. Death now calls `CombatExecution.CancelActiveExecutions`; body initialization, health/death presentation, weapon/equipment setup, GASP input, traversal, Mover, and the GASP AnimBP remain. No fight has been rewired or tested after this cleanup.

@@ -1,12 +1,14 @@
 #include "Combat/CombatExecutor_MeleeStrike.h"
 
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/CombatTarget.h"
 #include "Combat/CombatTechniqueExecutionConfigs.h"
 #include "Combat/CombatTechniqueRow.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
+#include "Engine/DataTable.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Ironbound.h"
@@ -117,13 +119,16 @@ bool UCombatExecutor_MeleeStrike::OnInitialize(
 	UE_LOG(
 		LogIronboundCombat,
 		Log,
-		TEXT("MeleeStrike [%s | %s] stance solved: region=%s bone=%s score=%.1f miss=%.1f"),
+		TEXT("MeleeStrike [%s | %s] stance solved: region=%s bone=%s score=%.1f miss=%.1f sample=%d time=%.3f"),
 		*GetNameSafe(GetFighter()),
 		*InRequest.TechniqueId.ToString(),
 		*PlannedTargetRegion.ToString(),
 		*PlannedTargetBone.ToString(),
 		PlannedTargetScore,
-		CurrentPredictedDistance);
+		CurrentPredictedDistance,
+		PlannedContactSampleIndex,
+		PlannedTrajectory.Segments.IsValidIndex(PlannedContactSampleIndex)
+			? PlannedTrajectory.Segments[PlannedContactSampleIndex].TimeSeconds : -1.f);
 
 	return true;
 }
@@ -151,11 +156,25 @@ bool UCombatExecutor_MeleeStrike::SolveAttackPlan()
 
 	if (!Fighter || !FighterMesh || !TargetMesh)
 	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("MeleeStrike plan inputs: fighter=%s fighterMesh=%s target=%s targetMesh=%s"),
+			*GetNameSafe(Fighter), *GetNameSafe(FighterMesh),
+			*GetNameSafe(Target), *GetNameSafe(TargetMesh));
 		return false;
 	}
 
 	FTransform Stance;
-	int32 UnusedSampleIndex = INDEX_NONE;
+	int32 ContactSampleIndex = INDEX_NONE;
+	const FName RequestedRegion = GetRequest().TargetRegion.IsNone()
+		? StrikeConfig()->DefaultTargetRegion
+		: GetRequest().TargetRegion;
+	if (!RequestedRegion.IsNone() && !StrikeConfig()->CombatTargets->FindRow<FCombatTargetRow>(RequestedRegion, TEXT("MeleeStrike target region"), false))
+	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("MeleeStrike [%s]: target region '%s' is missing from CombatTargets"),
+			*GetNameSafe(Fighter), *RequestedRegion.ToString());
+		return false;
+	}
 
 	if (!UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 			FighterMesh,
@@ -166,14 +185,19 @@ bool UCombatExecutor_MeleeStrike::SolveAttackPlan()
 			Stance,
 			PlannedTargetRegion,
 			PlannedTargetBone,
-			UnusedSampleIndex,
+			ContactSampleIndex,
 			CurrentPredictedDistance,
-			PlannedTargetScore))
+			PlannedTargetScore,
+			RequestedRegion,
+			StrikeConfig()->AimPointAlongBlade,
+			StrikeConfig()->AimWindowStartFraction,
+			StrikeConfig()->AimWindowEndFraction))
 	{
 		return false;
 	}
 
 	PlannedTransform = Stance;
+	PlannedContactSampleIndex = ContactSampleIndex;
 	return true;
 }
 
@@ -517,7 +541,9 @@ void UCombatExecutor_MeleeStrike::DrawAttackDebug()
 	/*
 	 * Committed trajectory in current pose vs actual weapon blade.
 	 */
-	for (int32 Index = 1; Index < PlannedTrajectory.Segments.Num(); ++Index)
+	for (int32 Index = 1;
+		 Index <= PlannedContactSampleIndex && Index < PlannedTrajectory.Segments.Num();
+		 ++Index)
 	{
 		const FBladeSegment& Previous = PlannedTrajectory.Segments[Index - 1];
 		const FBladeSegment& Current = PlannedTrajectory.Segments[Index];

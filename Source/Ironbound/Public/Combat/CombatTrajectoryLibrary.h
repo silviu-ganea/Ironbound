@@ -152,7 +152,11 @@ public:
 		FName& OutRegion,
 		FName& OutBone,
 		int32& OutSample,
-		float& OutTargetScore);
+		float& OutTargetScore,
+		FName RequiredRegion = NAME_None,
+		float AimPointAlongBlade = 1.f,
+		float AimWindowStartFraction = 0.f,
+		float AimWindowEndFraction = 1.f);
 
 	/**
 	 * Search attacker yaw and stand-off for a feasible contact against the
@@ -184,5 +188,9 @@ public:
 		FName& OutBone,
 		int32& OutSampleIndex,
 		float& OutPredictedDistance,
-		float& OutTargetScore);
+		float& OutTargetScore,
+		FName RequiredRegion = NAME_None,
+		float AimPointAlongBlade = 1.f,
+		float AimWindowStartFraction = 0.f,
+		float AimWindowEndFraction = 1.f);
 };

@@ -35,6 +35,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Tracking")
 	float WeaponTrackingStrength = 60.f;
 
+	/** Angular spring for the animated weapon arm. The validated overhead swing used 500. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Tracking", meta=(ClampMin="0.0"))
+	float WeaponAngularStrength = 500.f;
+
 	/** Strong temporary weapon-arm brace used while executing a parry. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Combat|Parry Brace")
 	float ParryWorldLinearStrength = 400.f;
@@ -103,6 +107,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
 	void SetWeaponTrackingStrength(float Strength);
+
+	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat")
+	void SetWeaponAngularStrength(float Strength);
 
 	UFUNCTION(BlueprintCallable, Category="Ironbound|Combat|Parry")
 	void BeginParryBrace();

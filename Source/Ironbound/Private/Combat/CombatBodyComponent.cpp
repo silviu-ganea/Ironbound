@@ -281,7 +281,7 @@ bool UCombatBodyComponent::InitializeBody(
 
             EPhysicsControlType::WorldSpace,
 
-            TrackingData(WeaponTrackingStrength, WeaponTrackingStrength),
+            TrackingData(WeaponTrackingStrength, WeaponAngularStrength),
 
             "WeaponWorld");
 
@@ -297,7 +297,7 @@ bool UCombatBodyComponent::InitializeBody(
 
             EPhysicsControlType::ParentSpace,
 
-            TrackingData(0.f, WeaponTrackingStrength),
+            TrackingData(0.f, WeaponAngularStrength),
 
             "WeaponParent");
 
@@ -499,7 +499,7 @@ void UCombatBodyComponent::UpdateWeaponDrives()
 
             WeaponWorldControls,
 
-            TrackingData(WeaponTrackingStrength, WeaponTrackingStrength));
+            TrackingData(WeaponTrackingStrength, WeaponAngularStrength));
 
 
 
@@ -507,7 +507,7 @@ void UCombatBodyComponent::UpdateWeaponDrives()
 
             WeaponParentControls,
 
-            TrackingData(0.f, WeaponTrackingStrength));
+            TrackingData(0.f, WeaponAngularStrength));
 
     }
 
@@ -531,6 +531,15 @@ void UCombatBodyComponent::SetWeaponTrackingStrength(float Strength)
 
     }
 
+}
+
+void UCombatBodyComponent::SetWeaponAngularStrength(float Strength)
+{
+    WeaponAngularStrength = FMath::Max(0.f, Strength);
+    if (!bParryBraceActive)
+    {
+        UpdateWeaponDrives();
+    }
 }
 
 

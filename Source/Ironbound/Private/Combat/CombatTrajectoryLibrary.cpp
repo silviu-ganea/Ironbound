@@ -730,6 +730,11 @@ bool UCombatTrajectoryLibrary::
 	}
 
 	OutTrajectory.bValid = true;
+	FBox TipBounds(EForceInit::ForceInit);
+	for (const FBladeSegment& Segment : OutTrajectory.Segments)
+	{
+		TipBounds += Segment.Tip;
+	}
 
 	UE_LOG(
 		LogIronboundCombat,
@@ -738,7 +743,7 @@ bool UCombatTrajectoryLibrary::
 			"BladeTrajectory: %s automatically analyzed | "
 			"animation %.3fs | samples %d | active %.3f..%.3f | "
 			"peak %.1f cm/s | active segments %d | "
-			"reach %.1f..%.1f"),
+			"reach %.1f..%.1f | tip bounds %s..%s | endpoint tip %s"),
 		*GetNameSafe(Sequence),
 		PlayLength,
 		NumSamples,
@@ -747,7 +752,10 @@ bool UCombatTrajectoryLibrary::
 		OutTrajectory.PeakTipSpeed,
 		OutTrajectory.Segments.Num(),
 		OutTrajectory.ReachMin,
-		OutTrajectory.ReachMax);
+		OutTrajectory.ReachMax,
+		*TipBounds.Min.ToCompactString(),
+		*TipBounds.Max.ToCompactString(),
+		*OutTrajectory.Segments.Last().Tip.ToCompactString());
 
 	return true;
 }
@@ -761,7 +769,11 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 	FName& OutRegion,
 	FName& OutBone,
 	int32& OutSample,
-	float& OutTargetScore)
+	float& OutTargetScore,
+	FName RequiredRegion,
+	float AimPointAlongBlade,
+	float AimWindowStartFraction,
+	float AimWindowEndFraction)
 {
 	OutRegion = NAME_None;
 	OutBone = NAME_None;
@@ -770,7 +782,8 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 
 	if (!VictimMesh ||
 		!CombatTargets ||
-		!Trajectory.bValid)
+		!Trajectory.bValid ||
+		Trajectory.Segments.IsEmpty())
 	{
 		return TNumericLimits<float>::Max();
 	}
@@ -803,12 +816,26 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 
 	const TMap<FName, uint8*>& Rows =
 		CombatTargets->GetRowMap();
+	const float FirstFraction = FMath::Clamp(
+		FMath::Min(AimWindowStartFraction, AimWindowEndFraction), 0.f, 1.f);
+	const float LastFraction = FMath::Clamp(
+		FMath::Max(AimWindowStartFraction, AimWindowEndFraction), 0.f, 1.f);
+	const int32 FirstSample = FMath::Clamp(
+		FMath::CeilToInt(FirstFraction * float(Trajectory.Segments.Num() - 1)),
+		0, Trajectory.Segments.Num() - 1);
+	const int32 LastSample = FMath::Clamp(
+		FMath::FloorToInt(LastFraction * float(Trajectory.Segments.Num() - 1)),
+		FirstSample, Trajectory.Segments.Num() - 1);
 
 	for (const TPair<FName, uint8*>& Pair :
 		 Rows)
 	{
 		const FName RegionName =
 			Pair.Key;
+		if (!RequiredRegion.IsNone() && RegionName != RequiredRegion)
+		{
+			continue;
+		}
 
 		const FCombatTargetRow* Row =
 			reinterpret_cast<
@@ -841,32 +868,19 @@ float UCombatTrajectoryLibrary::EvaluateScoredContact(
 			const FVector Contact =
 				VictimMesh->GetSocketLocation(Bone);
 
-			for (int32 Index = 0;
-				 Index < Trajectory.Segments.Num();
-				 ++Index)
+			for (int32 Index = FirstSample; Index <= LastSample; ++Index)
 			{
-				const FBladeSegment& Segment =
-					Trajectory.Segments[Index];
-
-				const float Miss =
-					FMath::Sqrt(
-						PointSegmentDistanceSquared(
-							Contact,
-							RootTransform.TransformPosition(
-								Segment.Base),
-							RootTransform.TransformPosition(
-								Segment.Tip)));
-
+				const FBladeSegment& Segment = Trajectory.Segments[Index];
+				const FVector AimPoint = FMath::Lerp(
+					Segment.Base, Segment.Tip,
+					FMath::Clamp(AimPointAlongBlade, 0.f, 1.f));
+				const float Miss = FVector::Distance(
+					Contact, RootTransform.TransformPosition(AimPoint));
 				if (Miss < RegionBestMiss)
 				{
-					RegionBestMiss =
-						Miss;
-
-					RegionBestBone =
-						Bone;
-
-					RegionBestSample =
-						Index;
+				RegionBestMiss = Miss;
+				RegionBestBone = Bone;
+				RegionBestSample = Index;
 				}
 			}
 		}
@@ -987,7 +1001,11 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 	FName& OutBone,
 	int32& OutSampleIndex,
 	float& OutPredictedDistance,
-	float& OutTargetScore)
+	float& OutTargetScore,
+	FName RequiredRegion,
+	float AimPointAlongBlade,
+	float AimWindowStartFraction,
+	float AimWindowEndFraction)
 {
 	OutAttackerTransform =
 		FTransform::Identity;
@@ -1013,6 +1031,10 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 		!Trajectory.bValid ||
 		Trajectory.Segments.IsEmpty())
 	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("Attack alignment input missing: attackerMesh=%s victimMesh=%s targets=%s valid=%d segments=%d"),
+			*GetNameSafe(AttackerMesh), *GetNameSafe(VictimMesh), *GetNameSafe(CombatTargets),
+			Trajectory.bValid ? 1 : 0, Trajectory.Segments.Num());
 		return false;
 	}
 
@@ -1025,6 +1047,9 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 	if (!Attacker ||
 		!Victim)
 	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("Attack alignment mesh owners missing: attacker=%s victim=%s"),
+			*GetNameSafe(Attacker), *GetNameSafe(Victim));
 		return false;
 	}
 
@@ -1073,7 +1098,6 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 					.GetAbsMax()) +
 		GStandoffBeyondReach;
 
-	const float MeshFacingOffsetYaw = AttackerMesh->GetRelativeRotation().Yaw;
 	const float FacingLimit = FMath::Clamp(MaxFacingDeviationDegrees, 0.f, 180.f);
 
 	bool bFoundFeasible =
@@ -1087,6 +1111,10 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 
 	float BestScore =
 		-TNumericLimits<float>::Max();
+	int32 ScoredCandidates = 0;
+	int32 FacingRejectedCandidates = 0;
+	int32 FeasibleCandidates = 0;
+	float ClosestScoredMiss = TNumericLimits<float>::Max();
 
 	auto Consider =
 		[&](const FVector& CandidateApproach, float Yaw, float Distance)
@@ -1117,28 +1145,44 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 				Region,
 				Bone,
 				Sample,
-				TargetScore);
+				TargetScore,
+				RequiredRegion,
+				AimPointAlongBlade,
+				AimWindowStartFraction,
+				AimWindowEndFraction);
 
 		if (Sample == INDEX_NONE)
 		{
 			return;
 		}
+		++ScoredCandidates;
+		ClosestScoredMiss = FMath::Min(ClosestScoredMiss, Miss);
 
 		const bool bFeasible =
 			Miss <=
 				GContactToleranceCm;
 
-		const float TowardTargetYaw = FMath::UnwindDegrees(
-			(-CandidateApproach).Rotation().Yaw - MeshFacingOffsetYaw);
+		// Trajectory samples are already in actor-root space (MeshToRoot was
+		// applied by BuildBladeTrajectoryWithGrip). Subtracting the mesh yaw
+		// here rotates the desired actor facing a second time.
+		const float TowardTargetYaw = (-CandidateApproach).Rotation().Yaw;
 		const float YawDeviation =
 			FMath::Abs(
 				FMath::FindDeltaAngleDegrees(
 					TowardTargetYaw,
 					Yaw));
 
-		if (YawDeviation > FacingLimit)
+		// A mathematically zero offset can differ by a few float ULPs after
+		// yaw wrapping. Keep the authored limit exact while tolerating that
+		// computation noise, otherwise a 0-degree limit rejects every stance.
+		if (YawDeviation > FacingLimit + KINDA_SMALL_NUMBER)
 		{
+			++FacingRejectedCandidates;
 			return;
+		}
+		if (bFeasible)
+		{
+			++FeasibleCandidates;
 		}
 
 		bool bBetter = false;
@@ -1159,14 +1203,16 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 						 TargetScore,
 						 BestScore))
 			{
-				if (YawDeviation < BestYawDeviation - 0.1f)
+				// Once the requested contact is feasible, use the furthest
+				// useful stance. Only break equal-range ties by accuracy and yaw.
+				if (Distance > BestStandoff + 0.1f)
 				{
 					bBetter = true;
 				}
-				else if (FMath::IsNearlyEqual(YawDeviation, BestYawDeviation, 0.1f) &&
-					(Distance > BestStandoff + 0.1f ||
-					 (FMath::IsNearlyEqual(Distance, BestStandoff, 0.1f) &&
-					  Miss < OutPredictedDistance - 0.01f)))
+				else if (FMath::IsNearlyEqual(Distance, BestStandoff, 0.1f) &&
+					(Miss < OutPredictedDistance - 0.01f ||
+					 (FMath::IsNearlyEqual(Miss, OutPredictedDistance, 0.01f) &&
+					  YawDeviation < BestYawDeviation - 0.1f)))
 				{
 					bBetter = true;
 				}
@@ -1239,23 +1285,12 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 
 		if (FMath::IsNearlyZero(FacingLimit))
 		{
-			// With strict target-facing, vary the stance around the defender
-			// instead of rotating the attacker away from the target. This lets
-			// the solver find the side/range where this animation can connect
-			// while preserving exact facing.
-			for (int32 Angle = 0; Angle < 72; ++Angle)
-			{
-				const float Radians = FMath::DegreesToRadians(5.f * Angle);
-				const FVector CandidateApproach(FMath::Cos(Radians), FMath::Sin(Radians), 0.f);
-				const float FacingYaw = FMath::UnwindDegrees(
-					(-CandidateApproach).Rotation().Yaw - MeshFacingOffsetYaw);
-				Consider(CandidateApproach, FacingYaw, Distance);
-			}
+			const float FacingYaw = (-Approach).Rotation().Yaw;
+			Consider(Approach, FacingYaw, Distance);
 		}
 		else
 		{
-			const float TargetWorldYaw = (-Approach).Rotation().Yaw;
-			const float TowardTargetYaw = FMath::UnwindDegrees(TargetWorldYaw - MeshFacingOffsetYaw);
+			const float TowardTargetYaw = (-Approach).Rotation().Yaw;
 			for (int32 Y = 0; Y < 72; ++Y)
 			{
 				Consider(Approach, TowardTargetYaw - 180.f + 5.f * Y, Distance);
@@ -1263,8 +1298,34 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 		}
 	}
 
+	if (FMath::IsNearlyZero(FacingLimit) && !bFoundFeasible)
+	{
+		// First try a straight approach. If the authored swing cannot
+		// connect from that line, search another stance around the defender
+		// while still facing the defender directly at every candidate.
+		for (int32 D = 0; D <= GDistanceProbes; ++D)
+		{
+			const float Distance = D == GDistanceProbes
+				? FMath::Clamp(CurrentDistance, Minimum, Maximum)
+				: FMath::Lerp(Minimum, Maximum,
+					float(D) / float(GDistanceProbes - 1));
+			for (int32 Angle = 0; Angle < 72; ++Angle)
+			{
+				const float Radians = FMath::DegreesToRadians(5.f * Angle);
+				const FVector CandidateApproach(FMath::Cos(Radians), FMath::Sin(Radians), 0.f);
+				const float FacingYaw = (-CandidateApproach).Rotation().Yaw;
+				Consider(CandidateApproach, FacingYaw, Distance);
+			}
+		}
+	}
+
 	if (OutSampleIndex == INDEX_NONE)
 	{
+		UE_LOG(LogIronboundCombat, Warning,
+			TEXT("Attack alignment found no stance: region=%s scored=%d facingRejected=%d feasible=%d closestMiss=%.1fcm facingLimit=%.3fdeg targetRows=%d"),
+			*RequiredRegion.ToString(),
+			ScoredCandidates, FacingRejectedCandidates, FeasibleCandidates,
+			ClosestScoredMiss, FacingLimit, CombatTargets->GetRowMap().Num());
 		return false;
 	}
 
@@ -1288,6 +1349,14 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 			ChosenYaw +
 				float(Y),
 			ChosenDistance);
+	}
+
+	if (!bFoundFeasible)
+	{
+		UE_LOG(LogIronboundCombat, Log,
+			TEXT("Attack alignment has no valid contact in aim window: region=%s closest=%.1fcm stance=%.1fcm yaw=%.1fdeg aimSample=%d"),
+			*RequiredRegion.ToString(), OutPredictedDistance, BestStandoff,
+			OutAttackerTransform.Rotator().Yaw, OutSampleIndex);
 	}
 
 	if (CVarDebugTrajectory
@@ -1318,18 +1387,29 @@ bool UCombatTrajectoryLibrary::SolveAttackAlignmentWithFacingLimit(
 				0,
 				2.f);
 
-			DrawDebugLine(
-				World,
-				OutAttackerTransform
-					.TransformPosition(A),
-				OutAttackerTransform
-					.TransformPosition(B),
-				FColor::Red,
-				false,
-				0.55f,
-				0,
-				3.f);
+			if (bFoundFeasible && I <= OutSampleIndex)
+			{
+				DrawDebugLine(World,
+					OutAttackerTransform.TransformPosition(A),
+					OutAttackerTransform.TransformPosition(B),
+					FColor::Red, false, 0.55f, 0, 3.f);
+			}
 		}
+
+		// Never label or draw a red stance for a failed contact guess.
+		if (!bFoundFeasible)
+		{
+			return false;
+		}
+
+		const FVector TargetPoint = VictimMesh->GetSocketLocation(OutBone);
+		const FBladeSegment& AimSample = Trajectory.Segments[OutSampleIndex];
+		const FVector PlannedContact = OutAttackerTransform.TransformPosition(
+			FMath::Lerp(AimSample.Base, AimSample.Tip,
+				FMath::Clamp(AimPointAlongBlade, 0.f, 1.f)));
+		DrawDebugSphere(World, TargetPoint, 6.f, 12, FColor::Green, false, 0.55f);
+		DrawDebugLine(World, PlannedContact, TargetPoint, FColor::Green,
+			false, 0.55f, 0, 2.f);
 
 		const float SolvedYaw =
 			OutAttackerTransform

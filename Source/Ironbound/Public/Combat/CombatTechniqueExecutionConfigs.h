@@ -46,6 +46,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting")
 	TObjectPtr<UDataTable> CombatTargets;
 
+	/** Default row in CombatTargets to aim at when the request does not specify a region. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting")
+	FName DefaultTargetRegion = TEXT("Head");
+
+	/** Point along the blade whose projected path should cross the target bone: 0 = base, 1 = tip. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float AimPointAlongBlade = 1.f;
+
+	/** Earliest point in the active swing eligible to be the planned contact. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float AimWindowStartFraction = 0.f;
+
+	/** Latest point eligible for contact; later animation is follow-through. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float AimWindowEndFraction = 1.f;
+
 	/** Distance from the solved stance location considered arrived, cm. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.1"))
 	float ArrivalTolerance = 8.f;
