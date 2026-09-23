@@ -304,9 +304,18 @@ float UCombatExecutor_MeleeStrike::GetCommitContactToleranceCm() const
 	{
 		return 0.f;
 	}
-	return GetRequest().PlanId > 0
-		? FMath::Min(LocalConfig->ContactToleranceCm, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm)
-		: LocalConfig->ContactToleranceCm;
+	if (GetRequest().PlanId <= 0)
+	{
+		return LocalConfig->ContactToleranceCm;
+	}
+
+	// The opportunity must start as a tight match when it is selected. Once
+	// navigation and stance alignment finish, an animated target's hand may
+	// have moved. Permit that bounded pose drift here; the actual weapon sweep
+	// remains the authority for hit and damage.
+	return FMath::Max(
+		FMath::Min(LocalConfig->ContactToleranceCm, UCombatTrajectoryLibrary::MaxOpportunityContactMissCm),
+		LocalConfig->MaxCommitTargetPoseDriftCm);
 }
 
 bool UCombatExecutor_MeleeStrike::HasStanceTimedOut(float Now) const
@@ -428,7 +437,7 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 				if (Now - InvalidContactStartWorldTime > 0.75f)
 				{
 					UE_LOG(LogIronboundCombat, Warning,
-					TEXT("[AI] EXECUTION PlanId=%d Result=ContactNoLongerValid Reason=OpportunityContactMarginExceeded miss=%.1fcm limit=%.1fcm"),
+					TEXT("[AI] EXECUTION PlanId=%d Result=ContactNoLongerValid Reason=TargetPoseDriftExceeded miss=%.1fcm limit=%.1fcm"),
 					GetRequest().PlanId, CurrentPredictedDistance, GetCommitContactToleranceCm());
 					FinishExecution(TEXT("contact no longer valid"));
 					return;
@@ -462,7 +471,7 @@ void UCombatExecutor_MeleeStrike::OnTick(float DeltaTime)
 				PositionError, StrikeConfig()->ArrivalTolerance,
 				FacingErrorDegrees, StrikeConfig()->FacingTolerance,
 				MeasuredSpeed, StrikeConfig()->SettledSpeed,
-				CurrentPredictedDistance, StrikeConfig()->ContactToleranceCm,
+				CurrentPredictedDistance, GetCommitContactToleranceCm(),
 				bAtStancePosition ? 1 : 0, TargetDrift,
 				Fighter->GetActorRotation().Yaw, PlannedTransform.Rotator().Yaw);
 			NextAlignmentDiagnosticWorldTime = Now + 1.f;
@@ -691,7 +700,7 @@ float UCombatExecutor_MeleeStrike::GetFacingDeltaDegrees() const
 	return IsAwaitingAlignment() ? FacingErrorDegrees : 0.f;
 }
 
-void UCombatExecutor_MeleeStrike::DrawPlannedAttackDebug() const
+void UCombatExecutor_MeleeStrike::DrawPlannedAttackDebug()
 {
 	const AActor* Fighter = GetFighter();
 	UWorld* World = GetWorld();
@@ -700,31 +709,39 @@ void UCombatExecutor_MeleeStrike::DrawPlannedAttackDebug() const
 	{
 		return;
 	}
+	const float Now = World->GetTimeSeconds();
+	if (Now + KINDA_SMALL_NUMBER < NextDebugDrawWorldTime)
+	{
+		return;
+	}
+	NextDebugDrawWorldTime = Now + 0.1f;
+	constexpr float DebugLifetimeSeconds = 1.f;
+
 	const FVector Stance = PlannedTransform.GetLocation();
-	DrawDebugSphere(World, Stance, 12.f, 12, FColor::Orange, false, 0.f, 0, 1.5f);
+	DrawDebugSphere(World, Stance, 12.f, 12, FColor::Orange, false, DebugLifetimeSeconds, 0, 1.5f);
 	DrawDebugDirectionalArrow(World, Stance, Stance +
 		PlannedTransform.GetRotation().GetForwardVector() * 65.f, 15.f,
-		FColor::Orange, false, 0.f, 0, 2.f);
+		FColor::Orange, false, DebugLifetimeSeconds, 0, 2.f);
 	DrawDebugLine(World, Fighter->GetActorLocation(), Stance,
-		FColor::White, false, 0.f, 0, 0.8f);
+		FColor::White, false, DebugLifetimeSeconds, 0, 0.8f);
 	for (int32 Index = 1; Index < PlannedTrajectory.Segments.Num(); ++Index)
 	{
 		DrawDebugLine(World,
 			PlannedTransform.TransformPosition(PlannedTrajectory.Segments[Index - 1].Tip),
 			PlannedTransform.TransformPosition(PlannedTrajectory.Segments[Index].Tip),
-			FColor::Cyan, false, 0.f, 0, 2.f);
+			FColor::Cyan, false, DebugLifetimeSeconds, 0, 2.f);
 	}
 	if (PlannedTrajectory.Segments.IsValidIndex(PlannedContactSampleIndex))
 	{
 		const FBladeSegment& Contact = PlannedTrajectory.Segments[PlannedContactSampleIndex];
 		const FVector Base = PlannedTransform.TransformPosition(Contact.Base);
 		const FVector Tip = PlannedTransform.TransformPosition(Contact.Tip);
-		DrawDebugLine(World, Base, Tip, FColor::Yellow, false, 0.f, 0, 3.f);
+		DrawDebugLine(World, Base, Tip, FColor::Yellow, false, DebugLifetimeSeconds, 0, 3.f);
 		if (PlannedAimPointAlongBlade >= 0.f)
 		{
 			DrawDebugSphere(World,
 				FMath::Lerp(Base, Tip, FMath::Clamp(PlannedAimPointAlongBlade, 0.f, 1.f)),
-				6.f, 10, FColor::Yellow, false, 0.f, 0, 2.f);
+				6.f, 10, FColor::Yellow, false, DebugLifetimeSeconds, 0, 2.f);
 		}
 	}
 	if (const AActor* Target = PlannedTarget.Get())
@@ -732,7 +749,7 @@ void UCombatExecutor_MeleeStrike::DrawPlannedAttackDebug() const
 		if (const USkeletalMeshComponent* Mesh = Target->FindComponentByClass<USkeletalMeshComponent>())
 		{
 			DrawDebugSphere(World, Mesh->GetBoneLocation(PlannedTargetBone), 8.f, 12,
-				FColor::Green, false, 0.f, 0, 1.5f);
+				FColor::Green, false, DebugLifetimeSeconds, 0, 1.5f);
 		}
 	}
 	DrawDebugString(World, Stance + FVector(0.f, 0.f, 85.f),
@@ -741,7 +758,7 @@ void UCombatExecutor_MeleeStrike::DrawPlannedAttackDebug() const
 			CurrentPredictedDistance,
 			FVector::Dist2D(Stance, PlannedTarget.IsValid()
 				? PlannedTarget->GetActorLocation() : Stance)),
-		nullptr, FColor::Cyan, 0.12f, false);
+		nullptr, FColor::Cyan, DebugLifetimeSeconds, false);
 }
 
 void UCombatExecutor_MeleeStrike::DrawAttackDebug()
@@ -753,6 +770,12 @@ void UCombatExecutor_MeleeStrike::DrawAttackDebug()
 	{
 		return;
 	}
+	const float Now = World->GetTimeSeconds();
+	if (Now + KINDA_SMALL_NUMBER < NextDebugDrawWorldTime)
+	{
+		return;
+	}
+	NextDebugDrawWorldTime = Now + 0.1f;
 
 	/*
 	 * Committed trajectory in current pose vs actual weapon blade.
@@ -770,7 +793,7 @@ void UCombatExecutor_MeleeStrike::DrawAttackDebug()
 			CommittedTransform.TransformPosition(Current.Tip),
 			FColor::Red,
 			false,
-			0.f,
+			1.f,
 			0,
 			1.f);
 	}

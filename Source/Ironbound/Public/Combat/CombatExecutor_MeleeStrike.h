@@ -63,7 +63,7 @@ private:
 	void HandleMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	void DrawAttackDebug();
-	void DrawPlannedAttackDebug() const;
+	void DrawPlannedAttackDebug();
 
 	EStrikePhase Phase = EStrikePhase::Waiting;
 
@@ -93,6 +93,7 @@ private:
 	float RequestWorldTime = 0.f;
 	float InvalidContactStartWorldTime = 0.f;
 	float NextAlignmentDiagnosticWorldTime = 0.f;
+	float NextDebugDrawWorldTime = 0.f;
 	float MaxCommittedFacingError = 0.f;
 	float FacingErrorDegrees = 0.f;
 

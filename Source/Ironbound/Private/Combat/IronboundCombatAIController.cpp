@@ -22,6 +22,55 @@
 #include "TimerManager.h"
 #include "Ironbound.h"
 
+namespace
+{
+	FString MakeFriendlyActorName(const AActor* Actor)
+	{
+		FString Name = GetNameSafe(Actor);
+		if (Name.IsEmpty()) return TEXT("unknown target");
+
+		const int32 LastUnderscore = Name.Find(TEXT("_"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+		if (LastUnderscore != INDEX_NONE)
+		{
+			const FString InstanceNumber = Name.RightChop(LastUnderscore + 1);
+			if (InstanceNumber.IsNumeric() && Name.Left(LastUnderscore).EndsWith(TEXT("_C")))
+			{
+				return FString::Printf(TEXT("Pawn %s"), *InstanceNumber);
+			}
+		}
+
+		Name.RemoveFromEnd(TEXT("_C"));
+		Name.ReplaceInline(TEXT("_"), TEXT(" "));
+		return Name;
+	}
+
+	FString MakeFriendlyTargetPart(FName Region, FName Bone)
+	{
+		const FName PartName = Bone.IsNone() ? Region : Bone;
+		FString Part = PartName.ToString().ToLower();
+		if (Part.IsEmpty()) return TEXT("body");
+
+		FString Side;
+		if (Part.EndsWith(TEXT("_l")))
+		{
+			Part = Part.LeftChop(2);
+			Side = TEXT("left ");
+		}
+		else if (Part.EndsWith(TEXT("_r")))
+		{
+			Part = Part.LeftChop(2);
+			Side = TEXT("right ");
+		}
+		if (Part.StartsWith(TEXT("spine_")))
+		{
+			Part = TEXT("torso");
+			Side.Reset();
+		}
+		Part.ReplaceInline(TEXT("_"), TEXT(" "));
+		return Side + Part;
+	}
+}
+
 AIronboundCombatAIController::AIronboundCombatAIController()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -378,6 +427,7 @@ void AIronboundCombatAIController::ClearAttackPlan(const TCHAR* Reason, bool bCa
 			FCString::Strcmp(Reason, TEXT("TargetChanged")) != 0 &&
 			FCString::Strcmp(Reason, TEXT("TargetUnavailable")) != 0 &&
 			FCString::Strcmp(Reason, TEXT("OwnerDied")) != 0 &&
+			FCString::Strcmp(Reason, TEXT("ExecutionTerminatedBeforeCommit")) != 0 &&
 			FCString::Strcmp(Reason, TEXT("Unpossessed")) != 0)
 		{
 			++ConsecutiveFailedPlans;
@@ -595,6 +645,20 @@ void AIronboundCombatAIController::DecisionStep()
 	if (Focus->GetCombatTarget() != Target)
 	{
 		Focus->SetCombatTarget(Target);
+		const FString PawnName = MakeFriendlyActorName(GetPawn());
+		const FString TargetName = MakeFriendlyActorName(Target);
+		const FString AcquisitionMessage = FString::Printf(
+			TEXT("AI %s: I found a target (%s)."), *PawnName, *TargetName);
+		UE_LOG(LogIronboundCombat, Log, TEXT("%s"), *AcquisitionMessage);
+		if (bShowIntentDebug && GEngine)
+		{
+			const uint64 DebugKey = 0x1B100000ULL + static_cast<uint64>(GetUniqueID() & 0x00FFFFFFu);
+			GEngine->AddOnScreenDebugMessage(
+				DebugKey,
+				FMath::Max(1.5f, IntentDebugRefreshSeconds),
+				FColor::Green,
+				AcquisitionMessage);
+		}
 	}
 
 	// Defense is considered before the next deliberate action, but this policy
@@ -676,9 +740,24 @@ void AIronboundCombatAIController::DecisionStep()
 	}
 	if (ActivePlanId != 0 && bHadActiveDeliberate && !bHasActiveDeliberate)
 	{
+		const int32 FinishedPlanId = ActivePlanId;
 		const bool bRecovered = bPlanEverCommitted;
+		const bool bTerminatedBeforeCommit = !bRecovered;
 		ClearAttackPlan(bRecovered ? TEXT("AttackRecovered") : TEXT("ExecutionTerminatedBeforeCommit"), false);
-		NextDeliberateAttemptWorldTime = bRecovered ? Now : Now + DeliberateRetryIntervalSeconds;
+		if (bTerminatedBeforeCommit)
+		{
+			// A selected stance can go stale as the target's animated pose changes
+			// while navigation is in progress. Retry from the current pose instead
+			// of suspending planning because neither actor root moved.
+			ConsecutiveFailedPlans = 0;
+			NextDeliberateAttemptWorldTime = Now + 0.1f;
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[AI] PLANNING PlanId=%d Result=RetryAfterPreCommitInvalidation"), FinishedPlanId);
+		}
+		else
+		{
+			NextDeliberateAttemptWorldTime = Now;
+		}
 	}
 	if (!bHasActiveDeliberate && ActivePlanId == 0)
 	{
@@ -904,11 +983,55 @@ void AIronboundCombatAIController::UpdateMovementRequest()
 
 void AIronboundCombatAIController::PublishIntent(const TCHAR* Intent, const AActor* Target)
 {
-	const FString PawnName = GetNameSafe(GetPawn());
-	const FString TargetName = GetNameSafe(Target);
-	const FString Message = Target
-		? FString::Printf(TEXT("AI %s: %s -> %s"), *PawnName, Intent, *TargetName)
-		: FString::Printf(TEXT("AI %s: %s"), *PawnName, Intent);
+	const FString PawnName = MakeFriendlyActorName(GetPawn());
+	const FString TargetName = MakeFriendlyActorName(Target);
+	const FString RawIntent = Intent ? FString(Intent) : FString(TEXT("thinking"));
+	const FString TargetPart = ActiveOpportunity.bFeasible && PlannedTarget.Get() == Target
+		? MakeFriendlyTargetPart(ActiveOpportunity.Region, ActiveOpportunity.Bone)
+		: FString(TEXT("body"));
+	const FString TargetPartPhrase = FString::Printf(TEXT("%s's %s"), *TargetName, *TargetPart);
+
+	FString TechniqueName = TEXT("sword");
+	if (Execution && Techniques)
+	{
+		for (const FName TechniqueId : Execution->GetActiveTechniqueIds())
+		{
+			if (const FCombatTechniqueRow* Row = Techniques->FindRow(TechniqueId);
+				Row && !Row->DisplayName.IsEmpty())
+			{
+				TechniqueName = Row->DisplayName.ToString();
+				break;
+			}
+		}
+	}
+
+	FString Sentence;
+	if (RawIntent.StartsWith(TEXT("Parry: "), ESearchCase::IgnoreCase))
+	{
+		Sentence = FString::Printf(TEXT("I am parrying %s with %s."), *TargetName, *RawIntent.RightChop(7));
+	}
+	else if (RawIntent == TEXT("Starting")) Sentence = TEXT("I am ready to fight.");
+	else if (RawIntent == TEXT("Missing combat setup")) Sentence = TEXT("I cannot fight because my combat setup is incomplete.");
+	else if (RawIntent == TEXT("Dead")) Sentence = TEXT("I am down and cannot fight.");
+	else if (RawIntent == TEXT("Searching")) Sentence = TEXT("I am looking for an enemy.");
+	else if (RawIntent == TEXT("Threat observed; parry unavailable")) Sentence = FString::Printf(TEXT("I see an incoming attack from %s, but I cannot parry it."), *TargetName);
+	else if (RawIntent == TEXT("Threat observed; reacting")) Sentence = FString::Printf(TEXT("I see an incoming attack from %s and am reacting."), *TargetName);
+	else if (RawIntent == TEXT("Aligning attack")) Sentence = FString::Printf(TEXT("I am setting my stance to strike %s."), *TargetPartPhrase);
+	else if (RawIntent == TEXT("Preparing attack")) Sentence = FString::Printf(TEXT("I am planning to use %s against %s."), *TechniqueName, *TargetPartPhrase);
+	else if (RawIntent == TEXT("Executing attack")) Sentence = FString::Printf(TEXT("I am striking %s with %s."), *TargetPartPhrase, *TechniqueName);
+	else if (RawIntent == TEXT("Holding parry")) Sentence = FString::Printf(TEXT("I am holding my guard against %s."), *TargetName);
+	else if (RawIntent == TEXT("Closing for attack opportunity")) Sentence = FString::Printf(TEXT("I am moving into a viable attack position against %s."), *TargetName);
+	else if (RawIntent == TEXT("Engaged; no attack selected")) Sentence = FString::Printf(TEXT("I found %s, but no deliberate attack is available."), *TargetName);
+	else if (RawIntent == TEXT("Engaging")) Sentence = FString::Printf(TEXT("I found %s and am choosing an attack."), *TargetName);
+	else if (RawIntent == TEXT("Parry")) Sentence = FString::Printf(TEXT("I am parrying %s."), *TargetName);
+	else
+	{
+		FString ReadableIntent = RawIntent;
+		ReadableIntent.ReplaceInline(TEXT("_"), TEXT(" "));
+		ReadableIntent.ToLowerInline();
+		Sentence = FString::Printf(TEXT("I am %s."), *ReadableIntent);
+	}
+	const FString Message = FString::Printf(TEXT("AI %s: %s"), *PawnName, *Sentence);
 
 	if (LastIntent != Message)
 	{

@@ -86,6 +86,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.1"))
 	float ContactToleranceCm = 25.f;
 
+	/** Maximum target-bone pose drift accepted after moving into a previously valid attack stance, cm. Actual weapon collision still decides whether the strike hits. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.1"))
+	float MaxCommitTargetPoseDriftCm = 50.f;
+
 	/** Safety deadline added after the sampled strike interval, seconds. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Engagement", meta=(ClampMin="0.0"))
 	float CommitTimeoutExtraSeconds = 2.f;
