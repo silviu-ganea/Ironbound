@@ -157,4 +157,5 @@ private:
 	void UpdateDrives();
 	void UpdateJointLimits(bool bRestore);
 	void SetParryGripDrive(bool bEnabled);
+	void SetWeaponWristLimits(bool bFree);
 };

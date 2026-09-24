@@ -28,7 +28,7 @@ namespace
 
 {
 
-    FPhysicsControlData TrackingData(float Linear, float Angular, float VelocityMultiplier = 1.f)
+    FPhysicsControlData TrackingData(float Linear, float Angular, float VelocityMultiplier = 1.f, bool bAccelerationMode = true)
 
     {
 
@@ -48,7 +48,7 @@ namespace
 
         Data.bUseSkeletalAnimation = true;
 
-        Data.bUseAccelerationDriveMode = true;
+        Data.bUseAccelerationDriveMode = bAccelerationMode;
 
         Data.bOnlyControlChildObject = true;
 
@@ -355,6 +355,14 @@ void UCombatBodyComponent::UpdateJointLimits(bool bRestore)
 
 {
 
+    const auto* Equipment = GetOwner()
+
+        ? GetOwner()->FindComponentByClass<UCombatEquipmentComponent>()
+
+        : nullptr;
+
+
+
     if (!FighterMesh || !PhysicsControls || !FighterMesh->GetPhysicsAsset())
 
     {
@@ -427,9 +435,152 @@ void UCombatBodyComponent::UpdateJointLimits(bool bRestore)
 
 
 
+            // WidenLimitsForDriveTarget sizes every DOF whose AUTHORED motion is Limited to
+
+            // the pose the solve is asking for. Run it first, then free the swing DOFs so it
+
+            // cannot re-clamp them in the same tick. Freeing the twist does not survive a
+
+            // tick, but a widened twist does, so the twist stays Limited-and-sized.
+
             Joint->WidenLimitsForDriveTarget(
 
                 Child.GetRelativeTransform(Parent).GetRotation(), Default);
+
+            // A DOF authored ACM_Locked can never be widened by WidenLimitsForDriveTarget, so
+
+            // during a parry it is the one hard block the widening cannot clear. Free such a
+
+            // DOF for the duration of the brace and put it back to Locked afterwards:
+
+            // RestoreAngularLimitsToDefault only rewrites DOFs whose default is Limited, so it
+
+            // will never undo this on its own. No-op on any joint with no Locked DOF.
+
+            if (WeaponArmBones.Contains(Default.ConstraintBone1))
+
+            {
+
+                const bool bLockedSwing1 = Default.GetAngularSwing1Motion() == ACM_Locked;
+
+                const bool bLockedSwing2 = Default.GetAngularSwing2Motion() == ACM_Locked;
+
+                const bool bLockedTwist = Default.GetAngularTwistMotion() == ACM_Locked;
+
+                if (bLockedSwing1 || bLockedSwing2 || bLockedTwist)
+
+                {
+
+                    if (bLockedSwing1)
+                    {
+                        Joint->SetAngularSwing1Limit(bParryBraceActive ? ACM_Free : ACM_Locked, 0.f);
+                    }
+
+                    if (bLockedSwing2)
+                    {
+                        Joint->SetAngularSwing2Limit(bParryBraceActive ? ACM_Free : ACM_Locked, 0.f);
+                    }
+
+                    if (bLockedTwist)
+                    {
+                        Joint->SetAngularTwistLimit(bParryBraceActive ? ACM_Free : ACM_Locked, 0.f);
+                    }
+
+                }
+
+            }
+
+            if (bParryBraceActive && Equipment &&
+
+                Default.ConstraintBone1 == Equipment->GetHandBone())
+
+            {
+
+                Joint->SetAngularSwing1Limit(ACM_Free, 0.f);
+
+                Joint->SetAngularSwing2Limit(ACM_Free, 0.f);
+
+            }
+
+        }
+
+    }
+
+}
+
+
+
+void UCombatBodyComponent::SetWeaponWristLimits(bool bFree)
+
+{
+
+    const auto* Equipment = GetOwner()
+
+        ? GetOwner()->FindComponentByClass<UCombatEquipmentComponent>()
+
+        : nullptr;
+
+
+
+    if (!FighterMesh || !Equipment || !FighterMesh->GetPhysicsAsset())
+
+    {
+
+        return;
+
+    }
+
+
+
+    const UPhysicsAsset* Asset = FighterMesh->GetPhysicsAsset();
+
+    const FName HandBone = Equipment->GetHandBone();
+
+
+
+    for (int32 Index = 0; Index < Asset->ConstraintSetup.Num(); ++Index)
+
+    {
+
+        const UPhysicsConstraintTemplate* Template = Asset->ConstraintSetup[Index];
+
+        FConstraintInstance* Joint = FighterMesh->GetConstraintInstanceByIndex(Index);
+
+
+
+        if (!Template || !Joint || Template->DefaultInstance.ConstraintBone1 != HandBone)
+
+        {
+
+            continue;
+
+        }
+
+
+
+        if (bFree)
+
+        {
+
+            // The parry solve derives the required hand transform from the desired blade
+
+            // pose. If the wrist cannot rotate, that pose is unreachable, the blade
+
+            // arrives at the right place at the wrong angle, and no drive strength helps.
+
+            Joint->SetAngularSwing1Limit(ACM_Free, 0.f);
+
+            Joint->SetAngularSwing2Limit(ACM_Free, 0.f);
+
+            Joint->SetAngularTwistLimit(ACM_Free, 0.f);
+
+        }
+
+        else
+
+        {
+
+            Joint->RestoreAngularLimitsToDefault(Template->DefaultInstance);
 
         }
 
@@ -473,7 +624,15 @@ void UCombatBodyComponent::UpdateWeaponDrives()
 
                 ParryWorldAngularStrength,
 
-                ParryVelocityMultiplier));
+                ParryVelocityMultiplier,
+
+                // Acceleration mode (the default) sizes the drive from the control joint's
+
+                // own inertia, which cannot see the 2.5 kg sword welded to hand_r. Force
+
+                // mode applies absolute torque, so the wrist can actually carry the blade.
+
+                false));
 
 
 
@@ -485,9 +644,11 @@ void UCombatBodyComponent::UpdateWeaponDrives()
 
                 0.f,
 
-                0.f,
+                ParryParentAngularStrength,
 
-                ParryVelocityMultiplier));
+                ParryVelocityMultiplier,
+
+                false));
 
     }
 
@@ -752,9 +913,15 @@ void UCombatBodyComponent::BeginParryBrace()
 
 
 
-    // First establish the compliant but very stiff simulated grip.
+    // Keep the grip a rigid weld: the parry solve assumes the blade is rigid on the hand.
 
-    SetParryGripDrive(true);
+    SetParryGripDrive(false);
+
+
+
+    // Free the wrist so the strengthened drive can actually orient the blade.
+
+    SetWeaponWristLimits(true);
 
 
 
@@ -811,6 +978,12 @@ void UCombatBodyComponent::EndParryBrace()
     // Restore the ordinary weapon grip before weakening the arm drives.
 
     SetParryGripDrive(false);
+
+
+
+    // Hand the wrist its authored limits back.
+
+    SetWeaponWristLimits(false);
 
 
 

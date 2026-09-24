@@ -11,6 +11,7 @@ class AActor;
 class UCombatExecutionComponent;
 class UCombatFocusComponent;
 class UCombatTechniqueComponent;
+class UExecConfig_ProceduralStrike;
 class UFighterComponent;
 class UFighterVitalsComponent;
 
@@ -130,6 +131,8 @@ private:
 	void UpdateMovementRequest();
 	void ClearAttackPlan(const TCHAR* Reason, bool bCancelExecution);
 	void ChooseAttackPlan(AActor* Target, float Now);
+	void ChooseProceduralAttackPlan(AActor* Target, FName TechniqueId,
+		const UExecConfig_ProceduralStrike* Config, int32 DecisionId);
 	void SetMovementMode(EIronboundAIMovementMode NewMode, const TCHAR* Reason);
 	void DrawRejectedOpportunity() const;
 	void SuspendFailedClosePursuit();

@@ -556,13 +556,18 @@ bool UCombatExecutionComponent::IsExecutingReactive() const
 
 bool UCombatExecutionComponent::GetActiveHandTarget(FTransform& OutHandTarget) const
 {
-	for (const FCombatExecutionRecord& Record : Executions)
+	// Reactive defense owns the weapon hand first; a procedural deliberate
+	// strike publishes its hand target only when no reactive one exists.
+	for (const ECombatExecutionKind Kind : { ECombatExecutionKind::Reactive, ECombatExecutionKind::Deliberate })
 	{
-		if (Record.Kind == ECombatExecutionKind::Reactive &&
-			Record.Executor &&
-			Record.Executor->GetHandTarget(OutHandTarget))
+		for (const FCombatExecutionRecord& Record : Executions)
 		{
-			return true;
+			if (Record.Kind == Kind &&
+				Record.Executor &&
+				Record.Executor->GetHandTarget(OutHandTarget))
+			{
+				return true;
+			}
 		}
 	}
 
@@ -1071,8 +1076,8 @@ void UCombatExecutionComponent::ResolveStrikeContacts(float DeltaTime)
 
 		Record.bContactResolved = true;
 		const FCombatTechniqueRow* AttackRow = Techniques->FindRow(Record.TechniqueId);
-		const UExecConfig_MeleeStrike* StrikeConfig = AttackRow
-			? Cast<UExecConfig_MeleeStrike>(AttackRow->ExecutionConfig)
+		const UDataTable* AttackCombatTargets = AttackRow && AttackRow->ExecutionConfig
+			? AttackRow->ExecutionConfig->GetCombatTargets()
 			: nullptr;
 		USkeletalMeshComponent* DefenderMesh = Defender->FindComponentByClass<USkeletalMeshComponent>();
 		FCombatInteraction Interaction;
@@ -1083,7 +1088,7 @@ void UCombatExecutionComponent::ResolveStrikeContacts(float DeltaTime)
 		Interaction.ContactNormal = Contact.ImpactNormal;
 		bool bUsedFallbackBodyRegion = false;
 		Interaction.BodyRegion = UCombatInteractionLibrary::ResolveBodyRegion(
-			StrikeConfig ? StrikeConfig->CombatTargets : nullptr,
+			AttackCombatTargets,
 			DefenderMesh,
 			Contact.BoneName,
 			Contact.ImpactPoint,
@@ -1133,7 +1138,7 @@ void UCombatExecutionComponent::ResolveStrikeContacts(float DeltaTime)
 			UCombatInteractionLibrary::ResolveWithTargets(
 				Interaction,
 				Techniques->TechniquesTable,
-				StrikeConfig ? StrikeConfig->CombatTargets : nullptr);
+				AttackCombatTargets);
 		if (Reaction->ReceiveInteraction(Interaction, Result))
 		{
 			if (UCombatBodyComponent* Body =

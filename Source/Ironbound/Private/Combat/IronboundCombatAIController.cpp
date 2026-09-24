@@ -4,6 +4,7 @@
 #include "Combat/CombatExecutionComponent.h"
 #include "Combat/CombatExecutionTypes.h"
 #include "Combat/CombatEquipmentComponent.h"
+#include "Combat/CombatExecutor_ProceduralStrike.h"
 #include "Combat/CombatTechniqueExecutionConfigs.h"
 #include "Combat/CombatFocusComponent.h"
 #include "Combat/CombatTechniqueComponent.h"
@@ -502,6 +503,12 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 		TEXT("[AI] DECISION %d Trigger=ReadyAfterRecoveryOrInvalidation Target=%s Technique=%s"),
 		DecisionId, *GetNameSafe(Target), *TechniqueId.ToString());
 	const FCombatTechniqueRow* Row = Techniques->FindRow(TechniqueId);
+	if (const UExecConfig_ProceduralStrike* ProceduralConfig =
+			Row ? Cast<UExecConfig_ProceduralStrike>(Row->ExecutionConfig) : nullptr)
+	{
+		ChooseProceduralAttackPlan(Target, TechniqueId, ProceduralConfig, DecisionId);
+		return;
+	}
 	const UExecConfig_MeleeStrike* Config = Row ? Cast<UExecConfig_MeleeStrike>(Row->ExecutionConfig) : nullptr;
 	UCombatEquipmentComponent* Equipment = GetPawn()->FindComponentByClass<UCombatEquipmentComponent>();
 	USkeletalMeshComponent* AttackerMesh = GetPawn()->FindComponentByClass<USkeletalMeshComponent>();
@@ -747,6 +754,99 @@ void AIronboundCombatAIController::ChooseAttackPlan(AActor* Target, float Now)
 		ClearAttackPlan(TEXT("ExecutionRefusedSelectedOpportunity"), false);
 		return;
 	}
+	RecentAttackRegions.Add(ActiveOpportunity.Region);
+	while (RecentAttackRegions.Num() > 2)
+	{
+		RecentAttackRegions.RemoveAt(0);
+	}
+	bHadActiveDeliberate = true;
+	SetMovementMode(bReposition ? EIronboundAIMovementMode::GuardManeuver :
+		EIronboundAIMovementMode::AttackAlignment, TEXT("SelectedOpportunityAdmitted"));
+}
+
+void AIronboundCombatAIController::ChooseProceduralAttackPlan(
+	AActor* Target,
+	FName TechniqueId,
+	const UExecConfig_ProceduralStrike* Config,
+	int32 DecisionId)
+{
+	// Procedural strikes have no sampled animation: the opportunity is the
+	// target region plus a stance derived from this fighter's own reach.
+	const FName RequiredRegion = PreferredAttackTargetRegion.IsNone()
+		? Config->DefaultTargetRegion : PreferredAttackTargetRegion;
+	TArray<FCombatAttackOpportunity> Opportunities;
+	UCombatExecutor_ProceduralStrike::FindProceduralStrikeOpportunities(
+		Config, TechniqueId, GetPawn(), Target, RequiredRegion, MaxNearbyMoveCm, Opportunities);
+
+	if (Opportunities.IsEmpty())
+	{
+		const float Distance = FVector::Dist2D(GetPawn()->GetActorLocation(), Target->GetActorLocation());
+		if (Distance > CloseApproachDistanceCm)
+		{
+			UE_LOG(LogIronboundCombat, Log,
+				TEXT("[AI] CHOICE PlanId=%d Intent=CloseForOpportunity Reason=NoProceduralReachAtPlanningBoundary distance=%.1fcm"),
+				DecisionId, Distance);
+			bClosingForOpportunity = true;
+			ConsecutivePathFailures = 0;
+			SetMovementMode(EIronboundAIMovementMode::Pursuit, TEXT("NoProceduralReach"));
+			return;
+		}
+
+		UE_LOG(LogIronboundCombat, Log,
+			TEXT("[AI] CHOICE PlanId=%d Result=NoViableOpportunity Reason=NoReachableProceduralTarget"), DecisionId);
+		++ConsecutiveFailedPlans;
+		FailedPlanTargetLocation = Target->GetActorLocation();
+		FailedPlanAttackerLocation = GetPawn()->GetActorLocation();
+		return;
+	}
+
+	// Prefer regions not struck recently, then the best quality.
+	const FCombatAttackOpportunity* Chosen = nullptr;
+	for (const bool bRequireFresh : { true, false })
+	{
+		for (const FCombatAttackOpportunity& Opportunity : Opportunities)
+		{
+			if (bRequireFresh && RecentAttackRegions.Contains(Opportunity.Region))
+			{
+				continue;
+			}
+			if (!Chosen || Opportunity.Quality > Chosen->Quality)
+			{
+				Chosen = &Opportunity;
+			}
+		}
+		if (Chosen)
+		{
+			break;
+		}
+		RecentAttackRegions.Reset();
+	}
+
+	ActiveOpportunity = *Chosen;
+	bHasRejectedOpportunity = false;
+	bClosingForOpportunity = false;
+	ActivePlanId = DecisionId;
+	PlannedTarget = Target;
+	const bool bReposition = ActiveOpportunity.MovementCostCm > 1.f;
+
+	UE_LOG(LogIronboundCombat, Log,
+		TEXT("[AI] CHOICE PlanId=%d Intent=%s Technique=%s region=%s bone=%s quality=%.2f standoff=%.1fcm move=%.1fcm"),
+		ActivePlanId, bReposition ? TEXT("RepositionForProceduralStrike") : TEXT("ProceduralStrikeFromCurrentPosition"),
+		*TechniqueId.ToString(), *ActiveOpportunity.Region.ToString(), *ActiveOpportunity.Bone.ToString(),
+		ActiveOpportunity.Quality, ActiveOpportunity.StandoffCm, ActiveOpportunity.MovementCostCm);
+
+	FCombatTechniqueRequest Request;
+	Request.TechniqueId = TechniqueId;
+	Request.Target = Target;
+	Request.TargetRegion = ActiveOpportunity.Region;
+	Request.PlannedOpportunity = ActiveOpportunity;
+	Request.PlanId = ActivePlanId;
+	if (!Execution->RequestTechnique(Request))
+	{
+		ClearAttackPlan(TEXT("ExecutionRefusedSelectedOpportunity"), false);
+		return;
+	}
+
 	RecentAttackRegions.Add(ActiveOpportunity.Region);
 	while (RecentAttackRegions.Num() > 2)
 	{

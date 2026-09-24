@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "Engine/DataTable.h"
 #include "CombatTechniqueExecutionConfigs.generated.h"
 
 class UCombatTechniqueExecutor;
@@ -25,6 +26,9 @@ public:
 	/** Concrete executor strategy created for techniques using this config. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Execution")
 	TSubclassOf<UCombatTechniqueExecutor> ExecutorClass;
+
+	/** Anatomical target table used to resolve hit regions; null when the strategy has none. */
+	virtual const UDataTable* GetCombatTargets() const { return nullptr; }
 };
 
 /** Authored configuration for the melee strike executor. */
@@ -96,6 +100,142 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug")
 	bool bDrawDebugBlade = true;
+
+	virtual const UDataTable* GetCombatTargets() const override { return CombatTargets.Get(); }
+};
+
+/**
+ * Authored policy for the procedural (animation-free) strike executor.
+ *
+ * Contains no absolute distances. Every spatial quantity is a fraction of
+ * the executing fighter's own measured reach (upper arm + forearm from the
+ * reference skeleton, plus the equipped weapon's grip-to-contact distance) or
+ * of its arm length, so the same technique asset works for any body size,
+ * limb proportion and weapon.
+ */
+UCLASS(BlueprintType)
+class IRONBOUND_API UExecConfig_ProceduralStrike : public UCombatTechniqueExecutionConfig
+{
+	GENERATED_BODY()
+
+public:
+	// ----- Targeting -----
+
+	/** Anatomical target regions the strike may aim at (Bones + Score per row). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting")
+	TObjectPtr<UDataTable> CombatTargets;
+
+	/** Optional region restriction when the request does not name one. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting")
+	FName DefaultTargetRegion;
+
+	/** Point along the blade (0 = BladeBase, 1 = BladeTip) that is driven through the target. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Targeting", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float ContactBladeFraction = 0.7f;
+
+	// ----- Reach window (fractions of the fighter's reach R) -----
+
+	/** Preferred shoulder-to-target distance used when choosing where to stand. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reach", meta=(ClampMin="0.1", ClampMax="1.0"))
+	float PreferredReachFraction = 0.8f;
+
+	/** Closest shoulder-to-target distance from which the strike may start. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reach", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float MinReachFraction = 0.45f;
+
+	/** Farthest shoulder-to-target distance from which the strike may start. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reach", meta=(ClampMin="0.1", ClampMax="1.0"))
+	float MaxReachFraction = 0.95f;
+
+	/** Root distance from the chosen stance considered arrived. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Reach", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float ArrivalToleranceFraction = 0.08f;
+
+	// ----- Charge (chamber) search -----
+
+	/** Distance from the target point back to the charged contact point. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Charge", meta=(ClampMin="0.05", ClampMax="2.0"))
+	float ChargeDistanceFraction = 0.7f;
+
+	/** Distance the contact point keeps travelling past the target point. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Charge", meta=(ClampMin="0.0", ClampMax="2.0"))
+	float FollowThroughFraction = 0.3f;
+
+	/** Number of chamber directions sampled around the reach axis (right, high, overhead, left, low...). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Charge", meta=(ClampMin="4", ClampMax="48"))
+	int32 ChargeAngleSamples = 12;
+
+	/** How far each chamber direction is pulled back toward the attacker, degrees (0 = pure sweep). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Charge")
+	TArray<float> ChargePullBackAnglesDegrees = { 15.f, 35.f, 55.f };
+
+	/** Weapon roll samples when the weapon has no authored strike edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Charge", meta=(ClampMin="1", ClampMax="24"))
+	int32 UnknownEdgeRollSamples = 8;
+
+	/** Candidates within this fraction of the best comfort are eligible for random selection. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Charge", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float SelectionQualityBand = 0.85f;
+
+	// ----- Anatomy constraints -----
+
+	/** Fallback bones when the equipment grip does not resolve them. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy")
+	FName UpperArmBone = TEXT("upperarm_r");
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy")
+	FName LowerArmBone = TEXT("lowerarm_r");
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy")
+	FName HandBone = TEXT("hand_r");
+
+	/** Shoulder-to-hand distance limits, as fractions of the fighter's arm length. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float MinArmExtensionFraction = 0.35f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy", meta=(ClampMin="0.1", ClampMax="1.0"))
+	float MaxArmExtensionFraction = 0.98f;
+
+	/** How far behind the shoulder (along facing) the hand may go, as a fraction of arm length. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy", meta=(ClampMin="0.0", ClampMax="1.0"))
+	float MaxHandBehindShoulderFraction = 0.25f;
+
+	/** Maximum unavoidable wrist deviation for any pose on the path, degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy", meta=(ClampMin="1.0", ClampMax="180.0"))
+	float MaxWristDeviationDegrees = 80.f;
+
+	/** Poses validated along the charge travel and the strike line. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Anatomy", meta=(ClampMin="2", ClampMax="32"))
+	int32 PathValidationSamples = 8;
+
+	// ----- Timing -----
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Timing", meta=(ClampMin="0.05"))
+	float ChargeDurationSeconds = 0.45f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Timing", meta=(ClampMin="0.05"))
+	float StrikeDurationSeconds = 0.22f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Timing", meta=(ClampMin="0.0"))
+	float FollowThroughHoldSeconds = 0.08f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Timing", meta=(ClampMin="0.05"))
+	float RecoverySeconds = 0.4f;
+
+	/** Maximum time to reach the stance and face the target before abandoning. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Timing", meta=(ClampMin="0.5"))
+	float PreparationTimeoutSeconds = 8.f;
+
+	/** Allowed yaw error toward the target before charging, degrees. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Timing", meta=(ClampMin="0.1", ClampMax="90.0"))
+	float FacingToleranceDegrees = 10.f;
+
+	// ----- Debug -----
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Debug")
+	bool bDrawDebug = true;
+
+	virtual const UDataTable* GetCombatTargets() const override { return CombatTargets.Get(); }
 };
 
 /**

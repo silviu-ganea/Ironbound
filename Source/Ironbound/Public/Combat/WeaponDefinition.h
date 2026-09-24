@@ -89,6 +89,18 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
 	FVector BladeTip = FVector::ZeroVector;
 
+	/**
+	 * Weapon-local direction the striking edge faces (perpendicular to the
+	 * blade axis). Zero = unknown: procedural strikes then pick the most
+	 * comfortable roll instead of leading with the edge.
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
+	FVector StrikeEdgeDirection = FVector::ZeroVector;
+
+	/** True when the opposite side of StrikeEdgeDirection is also a cutting edge. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon")
+	bool bDoubleEdged = true;
+
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="Weapon", meta=(ClampMin="0.01"))
 	float MassKg = 2.5f;
 
